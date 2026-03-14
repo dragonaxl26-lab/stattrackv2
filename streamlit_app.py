@@ -2099,6 +2099,8 @@ def init_state() -> None:
         st.session_state._loaded_persistence_namespace = None
     if "_persistence_error" not in st.session_state:
         st.session_state._persistence_error = None
+    if "active_section" not in st.session_state:
+        st.session_state.active_section = "Calendar"
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -3453,30 +3455,31 @@ def render_torn_hero() -> None:
         f"""
         <div class="torn-topbar">
             <div class="torn-logo">TORN</div>
-            <div class="torn-nav">
-                <span>Overview</span>
-                <span>Setup</span>
-                <span>Progress</span>
-                <span>Gyms</span>
-                <span>Calendar</span>
-            </div>
+            <div></div>
             <div class="torn-clock">{now_label}</div>
         </div>
         <div class="torn-hero">
             <div class="torn-hero-title">Stat Tracker Command Console</div>
             <div class="torn-hero-sub">Torn-inspired planning console for training, jumps, unlocks, support energy, and day-by-day execution. Times shown in {get_app_timezone_label()} and aligned against Torn reset logic.</div>
-            <div class="torn-chip-row">
-                <span class="torn-chip">Battle Stats</span>
-                <span class="torn-chip">Happy Jumps</span>
-                <span class="torn-chip">99k Routing</span>
-                <span class="torn-chip">Gym Unlocks</span>
-                <span class="torn-chip">Energy Economy</span>
-            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+
+
+def render_section_nav() -> str:
+    st.caption("Navigate sections")
+    selected = st.radio(
+        "Primary navigation",
+        ["Overview", "Setup", "Progress", "Gyms", "Calendar"],
+        index=["Overview", "Setup", "Progress", "Gyms", "Calendar"].index(st.session_state.active_section) if st.session_state.active_section in ["Overview", "Setup", "Progress", "Gyms", "Calendar"] else 4,
+        horizontal=True,
+        key="section_nav_radio",
+        label_visibility="collapsed",
+    )
+    st.session_state.active_section = selected
+    return selected
 
 def _calendar_day_html(item: DailyInstruction, today: date) -> str:
     day_class = item.day_type.replace(' ', '_')
@@ -3622,9 +3625,9 @@ def main() -> None:
         st.info("Load demo data or sync with your API key to begin.")
         return
 
-    tabs = st.tabs(["Overview", "Setup", "Progress", "Gyms", "Calendar"])
+    selected_section = render_section_nav()
 
-    with tabs[1]:
+    if selected_section == "Setup":
         manual_mods = render_setup_tab()
         st.subheader("War and schedule inputs")
         render_war_calendar_editor(st.session_state.player_state)
@@ -3636,25 +3639,22 @@ def main() -> None:
 
     plan = build_plan_preview(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods, days=preview_days)
 
-    with tabs[0]:
+    if selected_section == "Overview":
         render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
         render_support_status(st.session_state.goal_settings)
         render_today_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         render_jump_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         render_99k_optimizer_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-
-    with tabs[2]:
+    elif selected_section == "Progress":
         render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
         render_forecast(player_state, st.session_state.goal_settings, manual_mods)
         with st.expander("Gain engine debug"):
             render_gain_debug_panel(player_state, st.session_state.goal_settings, st.session_state.ratio_profile, manual_mods)
-
-    with tabs[3]:
+    elif selected_section == "Gyms":
         render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         render_frontline_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         render_unlocked_gym_editor(player_state)
-
-    with tabs[4]:
+    elif selected_section == "Calendar":
         render_calendar_tab(plan, player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         st.subheader("Today’s timed actions")
         render_daily_planner_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
