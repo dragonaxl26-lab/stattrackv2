@@ -2986,170 +2986,303 @@ def inject_torn_theme() -> None:
         """
         <style>
         .stApp {
-            background: linear-gradient(180deg, #141414 0%, #101010 55%, #0b0b0b 100%);
-            color: #e8e8e8;
+            background:
+                radial-gradient(circle at 18% 22%, rgba(120,120,120,0.08), transparent 28%),
+                radial-gradient(circle at 82% 26%, rgba(255,255,255,0.05), transparent 20%),
+                linear-gradient(180deg, #151515 0%, #0f1114 46%, #090a0c 100%);
+            color: #e2e6ea;
         }
         .block-container {
-            padding-top: 1.5rem;
+            padding-top: 1.2rem;
             padding-bottom: 2rem;
+            max-width: 1680px;
         }
-        h1, h2, h3 {
-            color: #f2f2f2 !important;
-            letter-spacing: 0.02em;
+        .stSidebar {
+            background: linear-gradient(180deg, #1a1d21 0%, #121417 100%);
+            border-right: 1px solid rgba(255,255,255,0.05);
+        }
+        h1, h2, h3, [data-testid="stMarkdownContainer"] h4 {
+            color: #f1f3f5 !important;
+            letter-spacing: 0.01em;
+        }
+        [data-testid="stMetric"] {
+            background: linear-gradient(180deg, rgba(53,57,64,0.75) 0%, rgba(22,24,28,0.96) 100%);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: 0.9rem 1rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+        }
+        [data-testid="stMetricLabel"] {
+            color: #cfd4da !important;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-size: 0.7rem !important;
+        }
+        [data-testid="stMetricValue"] {
+            color: #8ef041 !important;
+            text-shadow: 0 0 14px rgba(107,255,75,0.12);
         }
         div[data-baseweb="tab-list"] {
-            gap: 0.35rem;
-            background: rgba(255,255,255,0.02);
-            padding: 0.35rem;
-            border-radius: 0.9rem;
+            gap: 0.3rem;
+            background: linear-gradient(180deg, rgba(69,73,79,0.65) 0%, rgba(27,29,33,0.96) 100%);
+            padding: 0.42rem;
+            border-radius: 12px;
             border: 1px solid rgba(255,255,255,0.08);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
         }
         button[data-baseweb="tab"] {
-            background: #171717 !important;
-            border-radius: 0.8rem !important;
+            background: linear-gradient(180deg, #3b3f45 0%, #1b1d22 100%) !important;
+            border-radius: 9px !important;
             border: 1px solid rgba(255,255,255,0.06) !important;
-            color: #d6d6d6 !important;
+            color: #d9dde2 !important;
+            font-weight: 700 !important;
         }
         button[data-baseweb="tab"][aria-selected="true"] {
-            background: linear-gradient(180deg, #8e2323 0%, #5f1313 100%) !important;
-            color: #ffffff !important;
-            border-color: rgba(255,255,255,0.14) !important;
+            background: linear-gradient(180deg, #8ecb31 0%, #5e9f14 100%) !important;
+            color: #0d1108 !important;
+            border-color: rgba(255,255,255,0.15) !important;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 0 0 1px rgba(122,211,55,0.15);
+        }
+        .torn-topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            background: linear-gradient(180deg, #282c31 0%, #1c1f24 100%);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 14px;
+            padding: 0.6rem 0.95rem;
+            margin-bottom: 0.8rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .torn-logo {
+            font-size: 2rem;
+            font-weight: 900;
+            letter-spacing: 0.08em;
+            color: #f7f7f7;
+            text-shadow: 0 2px 0 rgba(0,0,0,0.55);
+        }
+        .torn-nav {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            color: #d2d7dd;
+            font-size: 0.86rem;
+            font-weight: 700;
+        }
+        .torn-nav span { opacity: 0.92; }
+        .torn-clock {
+            color: #d4dbe2;
+            font-size: 0.82rem;
+            font-weight: 700;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 999px;
+            padding: 0.28rem 0.75rem;
         }
         .torn-hero {
-            background: linear-gradient(135deg, rgba(120,19,19,0.95) 0%, rgba(66,10,10,0.95) 55%, rgba(21,21,21,0.98) 100%);
-            border: 1px solid rgba(255,255,255,0.10);
-            border-radius: 20px;
-            padding: 1.2rem 1.35rem;
+            position: relative;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at 75% 35%, rgba(255,255,255,0.08), transparent 24%),
+                linear-gradient(120deg, rgba(32,35,40,0.97) 0%, rgba(19,21,24,0.98) 42%, rgba(11,12,14,0.99) 100%);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 18px;
+            padding: 1.15rem 1.25rem;
             margin-bottom: 1rem;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 38px rgba(0,0,0,0.35);
+        }
+        .torn-hero:before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, rgba(173,17,17,0.10), transparent 24%, transparent 78%, rgba(255,255,255,0.03));
+            pointer-events: none;
         }
         .torn-hero-title {
-            font-size: 1.9rem;
-            font-weight: 800;
-            color: white;
-            margin-bottom: 0.15rem;
+            font-size: 1.8rem;
+            font-weight: 900;
+            color: #f6f6f6;
+            margin-bottom: 0.2rem;
+            letter-spacing: 0.02em;
         }
         .torn-hero-sub {
-            color: #f2dede;
-            font-size: 0.95rem;
+            color: #c8d0d8;
+            font-size: 0.94rem;
+            max-width: 74rem;
+        }
+        .torn-chip-row {
+            margin-top: 0.7rem;
+            display: flex;
+            gap: 0.45rem;
+            flex-wrap: wrap;
+        }
+        .torn-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            border-radius: 999px;
+            padding: 0.22rem 0.7rem;
+            background: rgba(142, 203, 49, 0.12);
+            border: 1px solid rgba(142, 203, 49, 0.28);
+            color: #c7f29c;
+            font-size: 0.74rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        [data-testid="stButton"] > button,
+        [data-testid="stDownloadButton"] > button {
+            background: linear-gradient(180deg, #4f555e 0%, #1e232a 100%);
+            color: #f0f3f5;
+            border: 1px solid rgba(255,255,255,0.09);
+            border-radius: 10px;
+            font-weight: 700;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        [data-testid="stButton"] > button:hover,
+        [data-testid="stDownloadButton"] > button:hover {
+            border-color: rgba(142,203,49,0.38);
+            color: #e9ffd2;
+        }
+        [data-testid="stTextInputRootElement"], [data-baseweb="select"], textarea, .stDateInput > div > div, .stNumberInput > div > div {
+            background: linear-gradient(180deg, rgba(58,62,69,0.78) 0%, rgba(22,24,28,0.98) 100%) !important;
+            border-radius: 10px !important;
+        }
+        [data-baseweb="input"] input, textarea {
+            color: #f2f5f7 !important;
+        }
+        .stDataFrame, .stTable {
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            overflow: hidden;
+            background: linear-gradient(180deg, rgba(43,47,53,0.72) 0%, rgba(16,18,21,0.96) 100%);
+        }
+        [data-testid="stMarkdownContainer"] code {
+            color: #c5f48a;
         }
         .calendar-cell {
-            background: #151515;
+            background: linear-gradient(180deg, rgba(52,56,62,0.66) 0%, rgba(16,18,21,0.98) 100%);
             border: 1px solid rgba(255,255,255,0.08);
-            border-left: 4px solid #444;
-            border-radius: 16px;
-            padding: 0.7rem 0.75rem;
+            border-left: 4px solid #5f646b;
+            border-radius: 14px;
+            padding: 0.68rem 0.74rem;
             min-height: 156px;
-            margin-bottom: 0.65rem;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+            margin-bottom: 0.4rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
         }
         .calendar-empty {
-            background: rgba(255,255,255,0.02);
+            background: linear-gradient(180deg, rgba(36,38,42,0.35) 0%, rgba(14,15,17,0.76) 100%);
             border: 1px dashed rgba(255,255,255,0.06);
-            border-radius: 16px;
+            border-radius: 14px;
             min-height: 156px;
-            margin-bottom: 0.65rem;
+            margin-bottom: 0.4rem;
         }
         .calendar-detail-shell {
-            margin-top: 0.55rem;
-            padding: 0.75rem;
-            border-radius: 14px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(8,12,18,0.86);
+            margin-top: 0.5rem;
+            padding: 0.7rem;
+            border-radius: 12px;
+            border: 1px solid rgba(142,203,49,0.22);
+            background: linear-gradient(180deg, rgba(38,42,31,0.72) 0%, rgba(12,14,11,0.94) 100%);
         }
         .calendar-detail-title {
             font-size: 0.95rem;
-            font-weight: 700;
-            color: #f2f5ff;
+            font-weight: 800;
+            color: #f2f4f6;
             margin-bottom: 0.45rem;
         }
         .calendar-detail-meta {
             font-size: 0.78rem;
-            color: #c9d3e3;
-            margin-bottom: 0.2rem;
+            color: #d0d8df;
+            margin-bottom: 0.18rem;
         }
         .calendar-step {
             display: flex;
             gap: 0.55rem;
             align-items: flex-start;
-            margin-top: 0.45rem;
-            padding: 0.55rem;
+            margin-top: 0.4rem;
+            padding: 0.52rem;
             border-radius: 12px;
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.05);
+            background: linear-gradient(180deg, rgba(60,64,70,0.32) 0%, rgba(18,20,24,0.88) 100%);
+            border: 1px solid rgba(255,255,255,0.06);
         }
         .calendar-step-index {
             min-width: 1.45rem;
             height: 1.45rem;
             border-radius: 999px;
-            background: rgba(188, 26, 61, 0.22);
-            color: #ffd9e2;
+            background: rgba(142, 203, 49, 0.18);
+            color: #d6ffad;
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 0.75rem;
-            font-weight: 700;
-        }
-        .calendar-step-body {
-            min-width: 0;
+            font-weight: 800;
         }
         .calendar-step-when {
             font-size: 0.72rem;
-            color: #8ea4bf;
+            color: #9ac85f;
             margin-bottom: 0.12rem;
         }
         .calendar-step-action {
             font-size: 0.8rem;
             color: #f4f6fb;
-            font-weight: 700;
+            font-weight: 800;
             margin-bottom: 0.15rem;
         }
         .calendar-step-details {
             font-size: 0.73rem;
-            color: #c5cede;
+            color: #cad3dd;
             line-height: 1.35;
         }
         .calendar-date {
-            font-weight: 800;
+            font-weight: 900;
             color: #ffffff;
-            margin-bottom: 0.35rem;
+            margin-bottom: 0.32rem;
             font-size: 0.98rem;
         }
         .calendar-meta {
-            color: #d7d7d7;
+            color: #dfe4e8;
             font-size: 0.8rem;
             line-height: 1.35;
-            margin-top: 0.2rem;
+            margin-top: 0.18rem;
         }
         .calendar-badge {
             display: inline-block;
             border-radius: 999px;
             padding: 0.14rem 0.48rem;
-            font-size: 0.72rem;
-            font-weight: 700;
-            margin-bottom: 0.45rem;
+            font-size: 0.7rem;
+            font-weight: 800;
+            margin-bottom: 0.42rem;
             background: rgba(255,255,255,0.08);
             color: #f5f5f5;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
         }
-        .day-normal { border-left-color: #5d5d5d; }
-        .day-prep { border-left-color: #cc8b12; }
-        .day-happy_jump { border-left-color: #a43bf5; }
-        .day-super_happy_jump { border-left-color: #ff5b5b; }
-        .day-war { border-left-color: #8a2020; }
-        .day-blocked { border-left-color: #666666; }
-        .day-happy-jump .calendar-badge, .day-happy_jump .calendar-badge { background: rgba(164,59,245,0.24); }
-        .day-super_happy_jump .calendar-badge { background: rgba(255,91,91,0.22); }
-        .day-prep .calendar-badge { background: rgba(204,139,18,0.25); }
-        .day-war .calendar-badge { background: rgba(138,32,32,0.28); }
+        .day-normal { border-left-color: #8ea0b5; }
+        .day-prep { border-left-color: #d4a63b; }
+        .day-happy_jump { border-left-color: #b46dff; }
+        .day-super_happy_jump { border-left-color: #8ecb31; }
+        .day-war { border-left-color: #bf3131; }
+        .day-blocked { border-left-color: #5d5d5d; }
+        .day-happy_jump .calendar-badge { background: rgba(180,109,255,0.22); }
+        .day-super_happy_jump .calendar-badge { background: rgba(142,203,49,0.20); color: #d8f8b2; }
+        .day-prep .calendar-badge { background: rgba(212,166,59,0.22); }
+        .day-war .calendar-badge { background: rgba(191,49,49,0.28); }
         .section-chip {
             display: inline-block;
-            margin-right: 0.4rem;
+            margin-left: 0.45rem;
             padding: 0.18rem 0.55rem;
             border-radius: 999px;
-            background: rgba(255,255,255,0.06);
-            color: #eaeaea;
-            font-size: 0.75rem;
-            font-weight: 700;
+            background: rgba(142,203,49,0.18);
+            color: #dbffb8;
+            font-size: 0.72rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .stAlert {
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.07);
         }
         </style>
         """,
@@ -3158,11 +3291,30 @@ def inject_torn_theme() -> None:
 
 
 def render_torn_hero() -> None:
+    now_label = fmt_local(local_now())
     st.markdown(
         f"""
+        <div class="torn-topbar">
+            <div class="torn-logo">TORN</div>
+            <div class="torn-nav">
+                <span>Overview</span>
+                <span>Setup</span>
+                <span>Progress</span>
+                <span>Gyms</span>
+                <span>Calendar</span>
+            </div>
+            <div class="torn-clock">{now_label}</div>
+        </div>
         <div class="torn-hero">
-            <div class="torn-hero-title">Torn Stat Tracker v2</div>
-            <div class="torn-hero-sub">Torn-themed planning console for training, jumps, gym unlocks, and daily execution. Times shown in {APP_TIMEZONE_LABEL}.</div>
+            <div class="torn-hero-title">Stat Tracker Command Console</div>
+            <div class="torn-hero-sub">Torn-inspired planning console for training, jumps, unlocks, support energy, and day-by-day execution. Times shown in {APP_TIMEZONE_LABEL} and aligned against Torn reset logic.</div>
+            <div class="torn-chip-row">
+                <span class="torn-chip">Battle Stats</span>
+                <span class="torn-chip">Happy Jumps</span>
+                <span class="torn-chip">99k Routing</span>
+                <span class="torn-chip">Gym Unlocks</span>
+                <span class="torn-chip">Energy Economy</span>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
