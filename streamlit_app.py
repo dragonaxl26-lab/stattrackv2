@@ -1194,7 +1194,8 @@ def projected_start_happy_for_day(state: PlayerState, goal: GoalSettings, plan_d
 def selected_99k_execute_at(goal: GoalSettings) -> Optional[datetime]:
     if not goal.schedule_99k_jump:
         return None
-    return datetime.combine(goal.scheduled_99k_jump_date, goal.scheduled_99k_jump_time)
+    dt = datetime.combine(goal.scheduled_99k_jump_date, goal.scheduled_99k_jump_time)
+    return dt.replace(tzinfo=APP_TIMEZONE)
 
 
 def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> datetime:
@@ -1207,6 +1208,7 @@ def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> dat
 
 
 def planned_xanax_stack_times(state: PlayerState, goal: GoalSettings, execute_at: datetime) -> List[datetime]:
+    execute_at = to_local(execute_at)
     first_candidate = execute_at - timedelta(hours=goal.jump_prep_hours)
     earliest_allowed = local_now() + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
     first = max(first_candidate, earliest_allowed)
