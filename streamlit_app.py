@@ -203,7 +203,7 @@ def next_tst_midnight_local(now_dt: Optional[datetime] = None) -> datetime:
 def next_daily_refill_ready_local(goal: "GoalSettings", now_dt: Optional[datetime] = None, after_dt: Optional[datetime] = None) -> datetime:
     now_dt = to_local(now_dt or local_now())
     after_dt = to_local(after_dt or now_dt)
-    if goal.daily_refill_available_now:
+    if not getattr(goal, "daily_refill_used_today", True):
         return max(after_dt, now_dt + timedelta(minutes=10))
     return max(after_dt, next_tst_midnight_local(now_dt))
 
@@ -365,6 +365,7 @@ class GoalSettings:
     jump_prep_hours: float = 30.0
     assumed_xanax_cooldown_hours: float = 8.0
     daily_refill_available_now: bool = True
+    daily_refill_used_today: bool = True
     current_company_stars: int = 0
     planned_10_star_date: date = field(default_factory=lambda: local_today() + timedelta(days=30))
     use_job_points_energy: bool = False
@@ -1297,7 +1298,7 @@ def build_today_energy_blocks(state: PlayerState, goal: GoalSettings, mods: Trai
     if state.recovery.daily_refill_enabled:
         refill_time = next_daily_refill_ready_local(goal, now_dt, after_dt=now_dt + timedelta(minutes=10))
         if refill_time.date() == now_dt.date():
-            refill_source = 'daily refill' if goal.daily_refill_available_now else 'daily refill reset (TST midnight)'
+            refill_source = 'daily refill' if not getattr(goal, 'daily_refill_used_today', True) else 'daily refill reset (TST midnight)'
             blocks.append((refill_time, int(state.recovery.refill_energy), refill_source))
 
     eod = end_of_day(now_dt)
@@ -2146,11 +2147,11 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     with c6:
         schedule_99k_jump = st.checkbox("Schedule 99k jump", value=goal.schedule_99k_jump)
     with c7a:
-        daily_refill_available_now = st.checkbox("Daily refill available now", value=goal.daily_refill_available_now)
+        daily_refill_used_today = st.checkbox("I already used today's refill", value=getattr(goal, "daily_refill_used_today", True), help="Turn this on if your daily refill has already been used and won't be ready again until the next TST midnight reset.")
 
     skip_war_days = st.checkbox("Skip war days", value=goal.skip_war_days)
     refill_reset_local = next_tst_midnight_local()
-    st.caption(f"App times are shown in Central Time. Torn resets use {TORN_TIMEZONE_LABEL}. {ct_vs_tst_text()}. Next TST midnight / refill reset: {fmt_local(refill_reset_local)} ({fmt_tst(refill_reset_local)}).")
+    st.caption(f"App times are shown in Central Time. Torn resets use {TORN_TIMEZONE_LABEL}. {ct_vs_tst_text()}. Next TST midnight / refill reset in CT: {fmt_local(refill_reset_local)} ({fmt_tst(refill_reset_local)}).")
 
     c7, c8, c9 = st.columns(3)
     with c7:
@@ -2300,7 +2301,8 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         jump_min_extra_gain_pct=float(jump_min_extra_gain_pct),
         jump_prep_hours=float(jump_prep_hours),
         assumed_xanax_cooldown_hours=float(assumed_xanax_cooldown_hours),
-        daily_refill_available_now=daily_refill_available_now,
+        daily_refill_available_now=(not daily_refill_used_today),
+        daily_refill_used_today=daily_refill_used_today,
         current_company_stars=int(current_company_stars),
         planned_10_star_date=planned_10_star_date,
         use_job_points_energy=use_job_points_energy,
@@ -2645,7 +2647,7 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
 
     if state.recovery.daily_refill_enabled:
         refill_dt = next_daily_refill_ready_local(goal, now_dt, after_dt=now_dt + timedelta(minutes=10))
-        if goal.daily_refill_available_now:
+        if not getattr(goal, "daily_refill_used_today", True):
             actions.append(JumpStep(refill_dt, "Use daily refill", "Use your daily refill after your current energy block if you are training today."))
             actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
         else:
