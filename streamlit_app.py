@@ -268,6 +268,24 @@ class GoalSettings:
     jump_prep_hours: float = 30.0
     assumed_xanax_cooldown_hours: float = 8.0
     daily_refill_available_now: bool = True
+    current_company_stars: int = 0
+    planned_10_star_date: date = field(default_factory=lambda: local_today() + timedelta(days=30))
+    use_job_points_energy: bool = False
+    current_job_points: int = 0
+    reserve_job_points: int = 0
+    job_points_daily_limit: int = 100
+    job_energy_per_point: int = 5
+    mcs_ready_claims_now: int = 0
+    mcs_energy_per_claim: int = 100
+    mcs_next_ready_date: date = field(default_factory=lambda: local_today() + timedelta(days=1))
+    mcs_next_ready_time: dtime = dtime(hour=12, minute=0)
+    fhc_count_available: int = 0
+    fhc_effective_energy: int = 150
+    can_count_available: int = 0
+    can_energy_per_can: int = 25
+    can_cooldown_hours: float = 2.0
+    today_energy_loss_adjustment: int = 0
+    forecast_energy_loss_per_day: int = 0
 
 
 @dataclass
@@ -312,6 +330,147 @@ class GymUnlockProjection:
     required_progress: Optional[int]
     remaining_energy: Optional[int]
     estimated_unlock_at: Optional[datetime]
+
+
+@dataclass
+class SupportInventory:
+    job_points_remaining: int
+    fhc_remaining: int
+    cans_remaining: int
+    mcs_ready_claims: int
+    next_mcs_ready_at: datetime
+
+
+def company_10_star_activation_date(goal: GoalSettings) -> date:
+    if goal.current_company_stars >= 10:
+        return local_today()
+    return goal.planned_10_star_date
+
+
+def company_10_star_active_on(goal: GoalSettings, plan_day: date) -> bool:
+    return plan_day >= company_10_star_activation_date(goal)
+
+
+def mcs_next_ready_local(goal: GoalSettings) -> datetime:
+    return datetime.combine(goal.mcs_next_ready_date, goal.mcs_next_ready_time).replace(tzinfo=APP_TIMEZONE)
+
+
+def init_support_inventory(goal: GoalSettings) -> SupportInventory:
+    return SupportInventory(
+        job_points_remaining=max(0, int(goal.current_job_points)),
+        fhc_remaining=max(0, int(goal.fhc_count_available)),
+        cans_remaining=max(0, int(goal.can_count_available)),
+        mcs_ready_claims=max(0, int(goal.mcs_ready_claims_now)),
+        next_mcs_ready_at=mcs_next_ready_local(goal),
+    )
+
+
+def refresh_support_inventory_for_day(goal: GoalSettings, inventory: SupportInventory, plan_day: date) -> None:
+    while inventory.next_mcs_ready_at.date() <= plan_day:
+        inventory.mcs_ready_claims += 1
+        inventory.next_mcs_ready_at = inventory.next_mcs_ready_at + timedelta(days=7)
+
+
+def apply_energy_losses(goal: GoalSettings, plan_day: date, energy: int) -> int:
+    adjusted = max(0, int(energy) - max(0, int(goal.forecast_energy_loss_per_day)))
+    if plan_day == local_today():
+        adjusted = max(0, adjusted - max(0, int(goal.today_energy_loss_adjustment)))
+    return adjusted
+
+
+def estimate_required_extra_energy_for_day(projected_state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, plan_day: date) -> int:
+    remaining_days = max(1, (goal.target_date - plan_day).days + 1)
+    remaining_stats = max(0.0, goal.target_total_stats - projected_state.stats.total())
+    if remaining_stats <= 0:
+        return 0
+    baseline_instruction = build_daily_instruction(projected_state, ratio, goal, plan_day, manual_mods)
+    baseline_gain = float(baseline_instruction.estimated_gain)
+    required_gain_per_day = remaining_stats / remaining_days
+    extra_gain_needed = max(0.0, required_gain_per_day - baseline_gain)
+    gain_per_energy = baseline_gain / max(1, int(baseline_instruction.estimated_energy)) if baseline_instruction.estimated_energy > 0 else 0.0
+    if gain_per_energy <= 0:
+        return 0
+    return max(0, math.ceil(extra_gain_needed / gain_per_energy))
+
+
+def allocate_support_energy(goal: GoalSettings, inventory: SupportInventory, plan_day: date, required_extra_energy: int) -> Tuple[int, List[str], List[Tuple[str, int, int]]]:
+    refresh_support_inventory_for_day(goal, inventory, plan_day)
+    if required_extra_energy <= 0:
+        return 0, [], []
+
+    allocations: List[Tuple[str, int, int]] = []
+    notes: List[str] = []
+    total_added = 0
+    remaining = required_extra_energy
+
+    if inventory.mcs_ready_claims > 0 and remaining > 0:
+        claim_energy = max(1, int(goal.mcs_energy_per_claim))
+        claims_to_use = min(inventory.mcs_ready_claims, math.ceil(remaining / claim_energy))
+        if claims_to_use > 0:
+            energy_added = claims_to_use * claim_energy
+            inventory.mcs_ready_claims -= claims_to_use
+            total_added += energy_added
+            remaining -= energy_added
+            allocations.append(("MCS stock energy", claims_to_use, energy_added))
+            notes.append(f"Use {claims_to_use} MCS stock claim(s) for {energy_added} extra energy.")
+
+    if goal.use_job_points_energy and company_10_star_active_on(goal, plan_day) and remaining > 0:
+        jp_available = max(0, inventory.job_points_remaining - max(0, int(goal.reserve_job_points)))
+        daily_jp_cap = max(0, int(goal.job_points_daily_limit))
+        jp_today = min(jp_available, daily_jp_cap)
+        if jp_today > 0:
+            jp_needed = math.ceil(remaining / max(1, int(goal.job_energy_per_point)))
+            jp_use = min(jp_today, jp_needed)
+            if jp_use > 0:
+                energy_added = jp_use * int(goal.job_energy_per_point)
+                inventory.job_points_remaining -= jp_use
+                total_added += energy_added
+                remaining -= energy_added
+                allocations.append(("Job points", jp_use, energy_added))
+                notes.append(f"Spend {jp_use} job points for {energy_added} extra energy once your company is 10★.")
+
+    if goal.fhc_allowed and inventory.fhc_remaining > 0 and remaining > 0:
+        fhc_energy = max(1, int(goal.fhc_effective_energy))
+        fhc_use = min(inventory.fhc_remaining, math.ceil(remaining / fhc_energy))
+        if fhc_use > 0:
+            energy_added = fhc_use * fhc_energy
+            inventory.fhc_remaining -= fhc_use
+            total_added += energy_added
+            remaining -= energy_added
+            allocations.append(("FHC", fhc_use, energy_added))
+            notes.append(f"Use {fhc_use} FHC(s) for about {energy_added} extra energy.")
+
+    if goal.cans_allowed and inventory.cans_remaining > 0 and remaining > 0:
+        can_energy = max(1, int(goal.can_energy_per_can))
+        can_use = min(inventory.cans_remaining, math.ceil(remaining / can_energy))
+        if can_use > 0:
+            energy_added = can_use * can_energy
+            inventory.cans_remaining -= can_use
+            total_added += energy_added
+            remaining -= energy_added
+            allocations.append(("Energy can", can_use, energy_added))
+            notes.append(f"Use {can_use} can(s) for about {energy_added} extra energy.")
+
+    return total_added, notes, allocations
+
+
+def total_support_energy_available_until_target(goal: GoalSettings) -> Tuple[int, int]:
+    days_to_target = max(1, (goal.target_date - local_today()).days + 1)
+    total = 0
+    if goal.use_job_points_energy:
+        jp_available = max(0, int(goal.current_job_points) - int(goal.reserve_job_points))
+        days_active = max(0, (goal.target_date - company_10_star_activation_date(goal)).days + 1)
+        total += min(jp_available, days_active * int(goal.job_points_daily_limit)) * int(goal.job_energy_per_point)
+    total += max(0, int(goal.mcs_ready_claims_now)) * int(goal.mcs_energy_per_claim)
+    next_ready = mcs_next_ready_local(goal)
+    while next_ready.date() <= goal.target_date:
+        total += int(goal.mcs_energy_per_claim)
+        next_ready += timedelta(days=7)
+    if goal.fhc_allowed:
+        total += max(0, int(goal.fhc_count_available)) * int(goal.fhc_effective_energy)
+    if goal.cans_allowed:
+        total += max(0, int(goal.can_count_available)) * int(goal.can_energy_per_can)
+    return total, max(0, int(total / days_to_target))
 
 
 def build_gym_db() -> List[Gym]:
@@ -960,6 +1119,8 @@ def simulate_day_with_unlocks(
     manual_mods: TrainingModifiers,
     highest_idx: int,
     progress_e: int,
+    support_bonus_energy: int = 0,
+    support_notes: Optional[List[str]] = None,
 ) -> Tuple[DailyInstruction, PlayerStats, int, int, Optional[datetime]]:
     combined_mods = state.training_modifiers.merge(manual_mods)
     projected_unlocked = unlocked_names_through_index(highest_idx)
@@ -983,7 +1144,7 @@ def simulate_day_with_unlocks(
         instruction = DailyInstruction(plan_day, 'war', 'none', 'none', 0, 0, 0.0, 0, 0, ['Faction war day. Training skipped in baseline planner.'])
         return instruction, state.stats, highest_idx, progress_e, None
 
-    day_energy = energy_budget_for_day(projected_state, goal, plan_day, combined_mods, day_type)
+    day_energy = energy_budget_for_day(projected_state, goal, plan_day, combined_mods, day_type) + max(0, int(support_bonus_energy))
     if day_energy <= 0:
         instruction = DailyInstruction(plan_day, day_type, target_stat, 'none', 0, 0, 0.0, 0, 0, ['No training energy budget for this day.'])
         return instruction, state.stats, highest_idx, progress_e, None
@@ -1058,6 +1219,8 @@ def simulate_day_with_unlocks(
     else:
         notes.append('Normal training day.')
     notes.extend(unlock_notes)
+    if support_notes:
+        notes.extend(support_notes)
     if combined_mods.detected_sources:
         notes.append('Detected modifiers: ' + '; '.join(combined_mods.detected_sources[:4]))
 
@@ -1341,17 +1504,16 @@ def energy_budget_for_day(state: PlayerState, goal: GoalSettings, plan_day: date
     # available before their cooldowns clear.
     if plan_day == local_today() and day_type not in {"happy_jump", "super_happy_jump"}:
         blocks = build_today_energy_blocks(state, goal, mods, local_now())
-        if day_type == "prep":
-            # Prep day should remain conservative: only current energy plus any
-            # natural regen/refill that is reachable today, but no extra jump stack.
-            return max(0, sum(energy for _when, energy, _source in blocks))
-        return max(0, sum(energy for _when, energy, _source in blocks))
+        reachable = max(0, sum(energy for _when, energy, _source in blocks))
+        return apply_energy_losses(goal, plan_day, reachable)
 
     if day_type == "prep":
-        return min(state.recovery.max_energy, max(state.recovery.current_energy, 0))
+        return apply_energy_losses(goal, plan_day, min(state.recovery.max_energy, max(state.recovery.current_energy, 0)))
     if day_type in {"happy_jump", "super_happy_jump"}:
-        return goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
-    return state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+        jump_energy = goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
+        return apply_energy_losses(goal, plan_day, jump_energy)
+    baseline = state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    return apply_energy_losses(goal, plan_day, baseline)
 
 
 def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, plan_day: date, manual_mods: TrainingModifiers) -> DailyInstruction:
@@ -1397,6 +1559,7 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
     projected_stats = state.stats
     highest_idx = highest_unlocked_gym_index(state)
     progress_e = max(0, int(goal.current_gym_energy_progress))
+    support_inventory = init_support_inventory(goal)
 
     for offset in range(days):
         plan_day = local_today() + timedelta(days=offset)
@@ -1413,8 +1576,10 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
             api_notes=list(state.api_notes),
             last_sync=state.last_sync,
         )
+        extra_energy_needed = estimate_required_extra_energy_for_day(projected_state, ratio, goal, manual_mods, plan_day)
+        support_bonus, support_notes, _allocs = allocate_support_energy(goal, support_inventory, plan_day, extra_energy_needed)
         instruction, projected_stats, highest_idx, progress_e, _unlock_time = simulate_day_with_unlocks(
-            projected_state, ratio, goal, plan_day, manual_mods, highest_idx, progress_e
+            projected_state, ratio, goal, plan_day, manual_mods, highest_idx, progress_e, support_bonus_energy=support_bonus, support_notes=support_notes
         )
         plan.append(instruction)
 
@@ -1433,13 +1598,17 @@ def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods
 
     combined_mods = state.training_modifiers.merge(manual_mods)
     start_happy = max(state.recovery.max_happy, goal.normal_day_start_happy)
-    baseline_energy = state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct)
+    baseline_energy = apply_energy_losses(goal, local_today(), state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct))
     sim = simulate_training_block(state.stats, target_stat, gym, baseline_energy, start_happy, combined_mods)
     est_daily_gain = float(sim["total_gain"])
 
     jump_plan = build_jump_plan(state, RatioProfile(), goal, combined_mods)
     if jump_plan is not None:
         est_daily_gain += max(0.0, jump_plan.projected_gain_delta) / 7.0
+
+    support_total_energy, support_avg_daily_energy = total_support_energy_available_until_target(goal)
+    gain_per_energy = est_daily_gain / max(1, baseline_energy)
+    est_daily_gain += support_avg_daily_energy * gain_per_energy
 
     if est_daily_gain <= 0:
         return None
@@ -1597,6 +1766,42 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         help="This progress is not exposed by the Torn API. Enter your estimated current progress toward the next gym unlock, like the Torntools browser extension shows.",
     )
 
+    st.subheader("Extra energy sources & setbacks")
+    st.caption("These are manual planning inputs. Use them to track your 10★ company timing, stock energy, FHCs, cans, and energy lost to overdoses or missed usage.")
+
+    e1, e2, e3 = st.columns(3)
+    with e1:
+        current_company_stars = st.number_input("Current company stars", min_value=0, max_value=10, value=int(goal.current_company_stars), step=1)
+        planned_10_star_date = st.date_input("Planned 10★ company date", value=goal.planned_10_star_date)
+        use_job_points_energy = st.checkbox("Use job points for energy at 10★", value=goal.use_job_points_energy)
+    with e2:
+        current_job_points = st.number_input("Current job points", min_value=0, value=int(goal.current_job_points), step=10)
+        reserve_job_points = st.number_input("Reserve job points", min_value=0, value=int(goal.reserve_job_points), step=10)
+        job_points_daily_limit = st.number_input("Job points daily limit", min_value=0, value=int(goal.job_points_daily_limit), step=10)
+    with e3:
+        job_energy_per_point = st.number_input("Energy per job point", min_value=1, value=int(goal.job_energy_per_point), step=1)
+        today_energy_loss_adjustment = st.number_input("Energy lost today (OD / missed use)", min_value=0, value=int(goal.today_energy_loss_adjustment), step=5)
+        forecast_energy_loss_per_day = st.number_input("Avg daily energy loss for forecast", min_value=0, value=int(goal.forecast_energy_loss_per_day), step=5)
+
+    e4, e5, e6 = st.columns(3)
+    with e4:
+        mcs_ready_claims_now = st.number_input("MCS claims ready now", min_value=0, value=int(goal.mcs_ready_claims_now), step=1)
+        mcs_energy_per_claim = st.number_input("Energy per MCS claim", min_value=0, value=int(goal.mcs_energy_per_claim), step=10)
+    with e5:
+        mcs_next_ready_date = st.date_input("Next MCS ready date", value=goal.mcs_next_ready_date)
+        mcs_next_ready_time = st.time_input("Next MCS ready time", value=goal.mcs_next_ready_time, step=timedelta(minutes=15), key="mcs_next_ready_time")
+    with e6:
+        fhc_count_available = st.number_input("FHCs available", min_value=0, value=int(goal.fhc_count_available), step=1)
+        fhc_effective_energy = st.number_input("Effective energy per FHC", min_value=0, value=int(goal.fhc_effective_energy), step=10)
+
+    e7, e8, e9 = st.columns(3)
+    with e7:
+        can_count_available = st.number_input("Energy cans available", min_value=0, value=int(goal.can_count_available), step=1)
+    with e8:
+        can_energy_per_can = st.number_input("Effective energy per can", min_value=0, value=int(goal.can_energy_per_can), step=5)
+    with e9:
+        can_cooldown_hours = st.number_input("Booster cooldown per can (hours)", min_value=0.0, value=float(goal.can_cooldown_hours), step=0.5)
+
     return GoalSettings(
         target_total_stats=float(target_total),
         target_date=target_date,
@@ -1618,6 +1823,24 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         jump_prep_hours=float(jump_prep_hours),
         assumed_xanax_cooldown_hours=float(assumed_xanax_cooldown_hours),
         daily_refill_available_now=daily_refill_available_now,
+        current_company_stars=int(current_company_stars),
+        planned_10_star_date=planned_10_star_date,
+        use_job_points_energy=use_job_points_energy,
+        current_job_points=int(current_job_points),
+        reserve_job_points=int(reserve_job_points),
+        job_points_daily_limit=int(job_points_daily_limit),
+        job_energy_per_point=int(job_energy_per_point),
+        mcs_ready_claims_now=int(mcs_ready_claims_now),
+        mcs_energy_per_claim=int(mcs_energy_per_claim),
+        mcs_next_ready_date=mcs_next_ready_date,
+        mcs_next_ready_time=mcs_next_ready_time,
+        fhc_count_available=int(fhc_count_available),
+        fhc_effective_energy=int(fhc_effective_energy),
+        can_count_available=int(can_count_available),
+        can_energy_per_can=int(can_energy_per_can),
+        can_cooldown_hours=float(can_cooldown_hours),
+        today_energy_loss_adjustment=int(today_energy_loss_adjustment),
+        forecast_energy_loss_per_day=int(forecast_energy_loss_per_day),
     )
 
 
@@ -1712,6 +1935,21 @@ def render_next_gym_progress(state: PlayerState, ratio: RatioProfile, goal: Goal
         st.success(f"Projected unlock: {fmt_local(projection.estimated_unlock_at)}")
     else:
         st.info("Projected unlock is beyond the current preview window.")
+
+
+def render_support_status(goal: GoalSettings) -> None:
+    st.subheader("Extra energy planner summary")
+    total_support_energy, avg_support_per_day = total_support_energy_available_until_target(goal)
+    activation_date = company_10_star_activation_date(goal)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Job points", f"{goal.current_job_points:,}")
+    c2.metric("FHCs", int(goal.fhc_count_available))
+    c3.metric("Cans", int(goal.can_count_available))
+    c4.metric("Support E until target", f"{total_support_energy:,}")
+    st.caption(f"10★ company activation date used by planner: {activation_date.isoformat()}. Average support energy available per day until target: {avg_support_per_day:,} E.")
+    st.caption(f"MCS ready now: {goal.mcs_ready_claims_now} claim(s). Next MCS ready: {fmt_local(mcs_next_ready_local(goal))}.")
+    if goal.today_energy_loss_adjustment or goal.forecast_energy_loss_per_day:
+        st.caption(f"Loss adjustments: today {goal.today_energy_loss_adjustment:,} E, forecast {goal.forecast_energy_loss_per_day:,} E/day.")
 
 
 def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
@@ -1848,7 +2086,7 @@ def render_jump_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSetting
 
 def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> List[JumpStep]:
     combined_mods = state.training_modifiers.merge(manual_mods)
-    today_type, jump_plan = day_type_for_date(state, ratio, goal, date.today(), combined_mods)
+    today_type, jump_plan = day_type_for_date(state, ratio, goal, local_today(), combined_mods)
     target_stat = choose_target_stat(state.stats, ratio)
     gym = best_gym_for_stat(state, target_stat)
     now_dt = local_now()
@@ -1858,7 +2096,7 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
         return actions
 
     if jump_plan is not None and today_type in {"prep", "happy_jump", "super_happy_jump"}:
-        return [step for step in build_jump_sequence(state, goal, jump_plan) if step.when.date() == date.today()]
+        return [step for step in build_jump_sequence(state, goal, jump_plan) if step.when.date() == local_today()]
 
     if state.recovery.current_energy > 0:
         actions.append(JumpStep(now_dt, "Train current energy", f"Train your current {state.recovery.current_energy} energy into {target_stat.title()} at {gym.name}."))
@@ -1889,7 +2127,37 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
     unlock_today = estimate_today_unlock_from_blocks(state, goal, combined_mods, now_dt)
     if unlock_today is not None:
         unlock_dt, next_gym = unlock_today
-        actions.append(JumpStep(unlock_dt, "Next gym unlocks", f"Projected unlock: {next_gym}. This estimate only uses today's current energy, refill, natural regen, and a same-day Xanax if cooldown clears today."))
+        actions.append(JumpStep(unlock_dt, "Next gym unlocks", f"Projected unlock: {next_gym}. This estimate only uses today's reachable energy and current loss adjustments."))
+
+    # Extra energy optimizer for today
+    today_inventory = init_support_inventory(goal)
+    required_extra_energy = estimate_required_extra_energy_for_day(state, ratio, goal, manual_mods, local_today())
+    bonus_energy, _support_notes, allocations = allocate_support_energy(goal, today_inventory, local_today(), required_extra_energy)
+    if bonus_energy > 0:
+        actions.append(JumpStep(now_dt, "Optimizer target", f"To stay closer to your goal date, the planner wants about {bonus_energy} extra energy today from support sources."))
+        cursor = max(now_dt + timedelta(minutes=15), now_dt)
+        booster_ready = now_dt + timedelta(minutes=max(0, state.recovery.booster_cd_minutes))
+        for source_name, units, energy_added in allocations:
+            if source_name == "MCS stock energy":
+                when = now_dt if goal.mcs_ready_claims_now > 0 else mcs_next_ready_local(goal)
+                actions.append(JumpStep(when, "Claim MCS stock energy", f"Claim {units} MCS stock energy reward(s) for {energy_added} energy, then train it in {gym.name}."))
+            elif source_name == "Job points":
+                activation = datetime.combine(company_10_star_activation_date(goal), dtime(hour=9, minute=0)).replace(tzinfo=APP_TIMEZONE)
+                when = max(now_dt, activation)
+                actions.append(JumpStep(when, "Spend job points for energy", f"Use {units} job points from your 10★ Game Shop for {energy_added} energy, then train it in {gym.name}."))
+            elif source_name == "FHC":
+                when = max(cursor, now_dt + timedelta(minutes=20))
+                actions.append(JumpStep(when, "Use FHC", f"Use {units} FHC(s) for about {energy_added} extra energy, ideally after your current energy/refill blocks are spent."))
+                cursor = when + timedelta(minutes=10)
+            elif source_name == "Energy can":
+                can_time = max(cursor, booster_ready)
+                for can_idx in range(units):
+                    actions.append(JumpStep(can_time, f"Use energy can #{can_idx + 1}", f"Use a can for about {goal.can_energy_per_can} energy, then train it in {gym.name}."))
+                    can_time = can_time + timedelta(hours=max(0.0, float(goal.can_cooldown_hours)))
+                cursor = can_time
+
+    if goal.today_energy_loss_adjustment > 0:
+        actions.append(JumpStep(now_dt, "Energy loss adjustment", f"Planner is subtracting {goal.today_energy_loss_adjustment} energy today to account for overdoses or missed usage."))
 
     return actions
 
@@ -1952,19 +2220,26 @@ def render_plan_table(plan: List[DailyInstruction]) -> None:
 
 def render_forecast(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     st.subheader("Forecast")
-    est_days = days_until_goal_estimate(state, goal, manual_mods)
+    baseline_goal = GoalSettings(**{**goal.__dict__, "use_job_points_energy": False, "mcs_ready_claims_now": 0, "fhc_count_available": 0, "can_count_available": 0})
+    baseline_days = days_until_goal_estimate(state, baseline_goal, manual_mods)
+    optimized_days = days_until_goal_estimate(state, goal, manual_mods)
     target_days = (goal.target_date - local_today()).days
-    if est_days is None:
+    if optimized_days is None:
         st.error("Forecast unavailable until a valid gym path and gain model are set.")
         return
 
-    c1, c2 = st.columns(2)
-    c1.metric("Estimated days to goal", est_days)
-    c2.metric("Days until target date", target_days)
-    if est_days <= target_days:
-        st.success("Current baseline projection is on pace for the selected goal.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Baseline days to goal", baseline_days if baseline_days is not None else "N/A")
+    c2.metric("Optimized days to goal", optimized_days)
+    c3.metric("Days until target date", target_days)
+
+    total_support_energy, avg_support_per_day = total_support_energy_available_until_target(goal)
+    st.caption(f"Support energy budget until target: {total_support_energy:,} total ({avg_support_per_day:,} E/day average).")
+
+    if optimized_days <= target_days:
+        st.success("With the current extra-energy plan, the projection is on pace for the selected goal.")
     else:
-        st.warning("Current baseline projection is behind the selected goal. Jump/booster optimization will matter.")
+        st.warning("Current baseline projection is behind the selected goal. Extra energy sources, jumps, and lost-energy adjustments will matter.")
 
 
 def render_war_calendar_editor(state: PlayerState) -> None:
@@ -2055,6 +2330,7 @@ def main() -> None:
 
     render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
     render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+    render_support_status(st.session_state.goal_settings)
     render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
     render_unlocked_gym_editor(player_state)
     render_war_calendar_editor(player_state)
