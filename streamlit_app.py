@@ -432,6 +432,17 @@ class GymUnlockProjection:
 
 
 @dataclass
+class SpecialistGymProjection:
+    gym_name: str
+    parent_gym: str
+    parent_unlocked: bool
+    current_value: float
+    required_value: float
+    remaining_value: float
+    estimated_unlock_at: Optional[datetime]
+
+
+@dataclass
 class SupportInventory:
     job_points_remaining: int
     fhc_remaining: int
@@ -668,6 +679,7 @@ def build_gym_db() -> List[Gym]:
         Gym("Gun Shop", "heavy", 10, 10_000_000, 36_610, {"strength": 6.5, "speed": 6.4, "defense": 6.2, "dexterity": 6.2}),
         Gym("Force Training", "heavy", 10, 15_000_000, 46_640, {"strength": 6.4, "speed": 6.5, "defense": 6.4, "dexterity": 6.8}),
         Gym("Cha Cha's", "heavy", 10, 20_000_000, 56_520, {"strength": 6.4, "speed": 6.4, "defense": 6.8, "dexterity": 7.0}),
+        Gym("Frontline Fitness", "specialist", 10, 50_000_000, None, {"strength": 7.5, "speed": 7.5, "defense": 0.0, "dexterity": 0.0}),
         Gym("Atlas", "heavy", 10, 30_000_000, 67_775, {"strength": 7.0, "speed": 6.4, "defense": 6.4, "dexterity": 6.5}),
         Gym("Last Round", "heavy", 10, 50_000_000, 84_535, {"strength": 6.8, "speed": 6.5, "defense": 7.0, "dexterity": 6.5}),
         Gym("The Edge", "heavy", 10, 75_000_000, 106_305, {"strength": 6.8, "speed": 7.0, "defense": 7.0, "dexterity": 6.8}),
@@ -677,10 +689,46 @@ def build_gym_db() -> List[Gym]:
 
 GYM_DB = build_gym_db()
 GYM_INDEX = {gym.name: gym for gym in GYM_DB}
+FRONTLINE_GYM_NAME = "Frontline Fitness"
+FRONTLINE_PARENT_GYM_NAME = "Cha Cha's"
+LINEAR_GYM_NAMES = [gym.name for gym in GYM_DB if gym.tier != "specialist"]
+SPECIALIST_GYM_NAMES = [gym.name for gym in GYM_DB if gym.tier == "specialist"]
 
 
 def ordered_gym_names() -> List[str]:
     return [gym.name for gym in GYM_DB]
+
+
+def linear_gym_names() -> List[str]:
+    return list(LINEAR_GYM_NAMES)
+
+
+def frontline_progress_values(stats: PlayerStats) -> Tuple[float, float, float]:
+    current_value = stats.strength + stats.speed
+    required_value = max(0.0, 1.25 * (stats.dexterity + stats.defense))
+    remaining_value = max(0.0, required_value - current_value)
+    return current_value, required_value, remaining_value
+
+
+def frontline_is_unlocked_for_stats(unlocked_names: List[str], stats: PlayerStats) -> bool:
+    if FRONTLINE_PARENT_GYM_NAME not in unlocked_names:
+        return False
+    current_value, required_value, _ = frontline_progress_values(stats)
+    return current_value >= required_value and required_value > 0
+
+
+def active_unlocked_names_for_stats(base_unlocked_names: List[str], stats: PlayerStats, highest_idx: Optional[int] = None) -> List[str]:
+    if highest_idx is None:
+        linear_names = [name for name in base_unlocked_names if name in LINEAR_GYM_NAMES]
+    else:
+        linear_names = unlocked_names_through_index(highest_idx)
+    names = set(linear_names)
+    for specialist in SPECIALIST_GYM_NAMES:
+        if specialist in base_unlocked_names:
+            names.add(specialist)
+    if frontline_is_unlocked_for_stats(list(names), stats):
+        names.add(FRONTLINE_GYM_NAME)
+    return [name for name in ordered_gym_names() if name in names]
 
 
 class TornAPIError(Exception):
@@ -1184,26 +1232,28 @@ def fetch_player_state_from_api(api_key: str, manual_unlocked_gyms: Optional[Lis
 
 
 def highest_unlocked_gym_index(state: PlayerState) -> int:
-    indices = [ordered_gym_names().index(name) for name in state.unlocked_gyms if name in GYM_INDEX]
+    indices = [LINEAR_GYM_NAMES.index(name) for name in state.unlocked_gyms if name in LINEAR_GYM_NAMES]
     return max(indices) if indices else 0
 
 
 def unlocked_names_through_index(highest_idx: int) -> List[str]:
-    names = ordered_gym_names()
+    names = linear_gym_names()
     highest_idx = max(0, min(highest_idx, len(names) - 1))
     return names[: highest_idx + 1]
 
 
 def next_gym_name_for_index(highest_idx: int) -> Optional[str]:
-    names = ordered_gym_names()
+    names = linear_gym_names()
     if highest_idx + 1 < len(names):
         return names[highest_idx + 1]
     return None
 
 
 def next_gym_threshold_for_index(highest_idx: int) -> Optional[int]:
-    if 0 <= highest_idx < len(GYM_DB):
-        return GYM_DB[highest_idx].e_for_next_gym
+    names = linear_gym_names()
+    if 0 <= highest_idx < len(names):
+        gym_name = names[highest_idx]
+        return GYM_INDEX[gym_name].e_for_next_gym
     return None
 
 
@@ -1296,7 +1346,7 @@ def simulate_day_with_unlocks(
     support_notes: Optional[List[str]] = None,
 ) -> Tuple[DailyInstruction, PlayerStats, int, int, Optional[datetime]]:
     combined_mods = state.training_modifiers.merge(manual_mods)
-    projected_unlocked = unlocked_names_through_index(highest_idx)
+    projected_unlocked = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_idx)
     projected_state = PlayerState(
         stats=state.stats,
         recovery=state.recovery,
@@ -1336,7 +1386,7 @@ def simulate_day_with_unlocks(
         time_cursor = jump_plan.execute_at
 
     while energy_left > 0:
-        unlocked_names = unlocked_names_through_index(highest_idx)
+        unlocked_names = active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx)
         gym = best_gym_for_stat_from_names(unlocked_names, target_stat)
         if gym is None:
             break
@@ -1362,6 +1412,11 @@ def simulate_day_with_unlocks(
         current_happy = int(sim['ending_happy'])
         energy_left -= segment_energy
 
+        post_segment_names = active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx)
+        if FRONTLINE_GYM_NAME in post_segment_names and FRONTLINE_GYM_NAME not in unlocked_names:
+            specialist_unlock_time = estimate_segment_end_time(time_cursor, segment_energy, day_energy)
+            unlock_notes.append(f'Projected specialist unlock during day: {FRONTLINE_GYM_NAME} at about {specialist_unlock_time.strftime("%H:%M")}.')
+
         if threshold is not None:
             progress_e += segment_energy
             if progress_e >= threshold and next_gym_name_for_index(highest_idx) is not None:
@@ -1379,7 +1434,7 @@ def simulate_day_with_unlocks(
     notes = [
         f'Train {target_stat.title()} in {gym_name}.',
         f'Phase: {milestone_phase(current_stats)}.',
-        f'Expected happy loss per train: {expected_happy_loss_per_train((best_gym_for_stat_from_names(unlocked_names_through_index(highest_idx), target_stat) or GYM_DB[0]).energy_cost, combined_mods)}.',
+        f'Expected happy loss per train: {expected_happy_loss_per_train((best_gym_for_stat_from_names(active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx), target_stat) or GYM_DB[0]).energy_cost, combined_mods)}.',
     ]
     if jump_plan is not None:
         notes.append(f'Next jump window: {jump_plan.execute_at.strftime("%Y-%m-%d %H:%M")}.')
@@ -1449,7 +1504,8 @@ def choose_target_stat(stats: PlayerStats, ratio: RatioProfile) -> str:
 
 
 def get_unlocked_gyms(state: PlayerState) -> List[Gym]:
-    return [GYM_INDEX[name] for name in state.unlocked_gyms if name in GYM_INDEX]
+    active_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_unlocked_gym_index(state))
+    return [GYM_INDEX[name] for name in active_names if name in GYM_INDEX]
 
 
 def best_gym_for_stat(state: PlayerState, stat_key: str) -> Optional[Gym]:
@@ -1931,7 +1987,7 @@ def render_sidebar() -> Tuple[str, int]:
 
 def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 90) -> GymUnlockProjection:
     highest_idx = highest_unlocked_gym_index(state)
-    current_gym = ordered_gym_names()[highest_idx]
+    current_gym = linear_gym_names()[highest_idx]
     next_gym = next_gym_name_for_index(highest_idx)
     threshold = next_gym_threshold_for_index(highest_idx)
     progress_e = max(0, int(goal.current_gym_energy_progress))
@@ -1946,7 +2002,7 @@ def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: Goal
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
-            unlocked_gyms=unlocked_names_through_index(projected_highest_idx),
+            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx),
             faction_war_days=list(state.faction_war_days),
             torn_name=state.torn_name,
             torn_id=state.torn_id,
@@ -1978,6 +2034,95 @@ def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: Goal
         remaining_energy=max(0, threshold - progress_e),
         estimated_unlock_at=None,
     )
+
+
+def estimate_frontline_unlock(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 365) -> SpecialistGymProjection:
+    highest_idx = highest_unlocked_gym_index(state)
+    base_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_idx)
+    current_value, required_value, remaining_value = frontline_progress_values(state.stats)
+    parent_unlocked = FRONTLINE_PARENT_GYM_NAME in base_names
+
+    if frontline_is_unlocked_for_stats(base_names, state.stats):
+        return SpecialistGymProjection(
+            gym_name=FRONTLINE_GYM_NAME,
+            parent_gym=FRONTLINE_PARENT_GYM_NAME,
+            parent_unlocked=True,
+            current_value=current_value,
+            required_value=required_value,
+            remaining_value=0.0,
+            estimated_unlock_at=local_now(),
+        )
+
+    projected_stats = state.stats
+    projected_highest_idx = highest_idx
+    projected_progress = max(0, int(goal.current_gym_energy_progress))
+    for offset in range(days):
+        plan_day = local_today() + timedelta(days=offset)
+        projected_state = PlayerState(
+            stats=projected_stats,
+            recovery=state.recovery,
+            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx),
+            faction_war_days=list(state.faction_war_days),
+            torn_name=state.torn_name,
+            torn_id=state.torn_id,
+            faction_id=state.faction_id,
+            faction_name=state.faction_name,
+            training_modifiers=state.training_modifiers,
+            api_notes=list(state.api_notes),
+            last_sync=state.last_sync,
+        )
+        _instruction, projected_stats, projected_highest_idx, projected_progress, unlock_time = simulate_day_with_unlocks(
+            projected_state, ratio, goal, plan_day, manual_mods, projected_highest_idx, projected_progress
+        )
+        projected_names = active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx)
+        if frontline_is_unlocked_for_stats(projected_names, projected_stats):
+            est_time = unlock_time or datetime.combine(plan_day, dtime(hour=20, minute=0), tzinfo=APP_TIMEZONE)
+            current_value, required_value, remaining_value = frontline_progress_values(projected_stats)
+            return SpecialistGymProjection(
+                gym_name=FRONTLINE_GYM_NAME,
+                parent_gym=FRONTLINE_PARENT_GYM_NAME,
+                parent_unlocked=FRONTLINE_PARENT_GYM_NAME in projected_names,
+                current_value=current_value,
+                required_value=required_value,
+                remaining_value=remaining_value,
+                estimated_unlock_at=est_time,
+            )
+
+    return SpecialistGymProjection(
+        gym_name=FRONTLINE_GYM_NAME,
+        parent_gym=FRONTLINE_PARENT_GYM_NAME,
+        parent_unlocked=parent_unlocked,
+        current_value=current_value,
+        required_value=required_value,
+        remaining_value=remaining_value,
+        estimated_unlock_at=None,
+    )
+
+
+def render_frontline_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    st.subheader("Frontline Fitness progress")
+    projection = estimate_frontline_unlock(state, ratio, goal, manual_mods)
+    current_value = projection.current_value
+    required_value = max(projection.required_value, 1.0)
+    progress = min(1.0, current_value / required_value)
+
+    st.write(f"Requirement: **{projection.parent_gym}** unlocked and **Strength + Speed** at least **25% higher** than **Dexterity + Defense**.")
+    if not projection.parent_unlocked:
+        st.info(f"You still need {projection.parent_gym} unlocked before {projection.gym_name} can open.")
+    st.write(f"Current Strength + Speed: **{current_value:,.0f}**")
+    st.write(f"Required for {projection.gym_name}: **{required_value:,.0f}**")
+    st.progress(progress)
+    if projection.remaining_value > 0:
+        st.caption(f"Remaining specialist requirement: {projection.remaining_value:,.0f}")
+    else:
+        st.caption(f"{projection.gym_name} requirement is currently met.")
+    if projection.estimated_unlock_at is not None:
+        if projection.estimated_unlock_at <= local_now() + timedelta(minutes=1):
+            st.success(f"{projection.gym_name} is available now in the planner.")
+        else:
+            st.success(f"Projected {projection.gym_name} unlock: {fmt_local(projection.estimated_unlock_at)}")
+    else:
+        st.info(f"Projected {projection.gym_name} unlock is beyond the current forecast window.")
 
 
 def render_goal_controls(goal: GoalSettings) -> GoalSettings:
@@ -2338,6 +2483,7 @@ def render_unlocked_gym_editor(state: PlayerState) -> None:
     st.caption("Live API sync may not expose unlocked gyms directly. Use this as the source of truth whenever needed.")
 
     gym_names = ordered_gym_names()
+    fill_names = linear_gym_names()
 
     if "gym_multiselect" not in st.session_state:
         st.session_state.gym_multiselect = list(state.unlocked_gyms or st.session_state.manual_unlocked_gyms)
@@ -2355,7 +2501,7 @@ def render_unlocked_gym_editor(state: PlayerState) -> None:
     with c2:
         highest_gym = st.selectbox(
             "Quick fill to highest unlocked gym",
-            options=["-- none --"] + gym_names,
+            options=["-- none --"] + fill_names,
             index=0,
             key="highest_unlocked_gym_selector",
         )
@@ -2364,8 +2510,8 @@ def render_unlocked_gym_editor(state: PlayerState) -> None:
         apply_fill = st.button("Apply quick fill", use_container_width=True)
 
     if apply_fill and highest_gym != "-- none --":
-        highest_idx = gym_names.index(highest_gym)
-        selected = gym_names[: highest_idx + 1]
+        highest_idx = fill_names.index(highest_gym)
+        selected = fill_names[: highest_idx + 1]
         st.session_state.gym_multiselect = selected
         st.session_state.manual_unlocked_gyms = selected
         state.unlocked_gyms = selected
@@ -2374,11 +2520,17 @@ def render_unlocked_gym_editor(state: PlayerState) -> None:
         st.session_state.gym_multiselect = selected
 
     ordered_selection = [name for name in gym_names if name in st.session_state.gym_multiselect]
+    linear_selection = [name for name in ordered_selection if name in LINEAR_GYM_NAMES]
+    if FRONTLINE_GYM_NAME in ordered_selection and not frontline_is_unlocked_for_stats(linear_selection, state.stats):
+        ordered_selection = [name for name in ordered_selection if name != FRONTLINE_GYM_NAME]
+        st.info(f"{FRONTLINE_GYM_NAME} will appear automatically once {FRONTLINE_PARENT_GYM_NAME} is unlocked and your Strength + Speed requirement is met.")
+
     st.session_state.manual_unlocked_gyms = ordered_selection
     state.unlocked_gyms = ordered_selection
 
-    if ordered_selection:
-        st.caption(f"Highest unlocked gym in planner: {ordered_selection[-1]}")
+    active_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_unlocked_gym_index(state))
+    if active_names:
+        st.caption(f"Highest unlocked gym in planner: {active_names[-1]}")
     else:
         st.warning("No unlocked gyms selected yet. The planner cannot choose a gym until this is set.")
 
@@ -2754,6 +2906,7 @@ def main() -> None:
 
     render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
     render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+    render_frontline_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
     render_support_status(st.session_state.goal_settings)
     render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
     render_unlocked_gym_editor(player_state)
