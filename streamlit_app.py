@@ -140,7 +140,6 @@ def _write_persistence_store(store: Dict[str, Any]) -> None:
 
 
 def reset_runtime_state(keep_api_fields: bool = True) -> None:
-    api_input = st.session_state.get("api_key_input", "") if keep_api_fields else ""
     loaded_namespace = st.session_state.get("_loaded_persistence_namespace") if keep_api_fields else None
     st.session_state.player_state = None
     st.session_state.goal_settings = GoalSettings()
@@ -155,7 +154,6 @@ def reset_runtime_state(keep_api_fields: bool = True) -> None:
     st.session_state.preview_days = 30
     st.session_state._persistence_error = None
     if keep_api_fields:
-        st.session_state.api_key_input = api_input
         st.session_state._loaded_persistence_namespace = loaded_namespace
 
 
