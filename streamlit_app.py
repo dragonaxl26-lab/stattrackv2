@@ -488,13 +488,11 @@ def _parse_battlestats(payload: Dict[str, Any]) -> PlayerStats:
     def get_stat(stat_name: str) -> float:
         blob = stats_root.get(stat_name)
 
+        # Torn v2 shape:
+        # "strength": {"value": 400108, "modifier": -26, ...}
         if isinstance(blob, dict):
             value = _safe_float(blob.get("value"), 0.0)
-            modifier = _safe_float(blob.get("modifier"), 0.0)
             if value > 0:
-                mult = 1.0 + (modifier / 100.0)
-                if mult > 0:
-                    return value / mult
                 return value
 
         direct = _first_present(
@@ -521,7 +519,6 @@ def _parse_battlestats(payload: Dict[str, Any]) -> PlayerStats:
         defense=get_stat("defense"),
         dexterity=get_stat("dexterity"),
     )
-
 
 def _parse_recovery_state(bars: Dict[str, Any], cooldowns: Dict[str, Any]) -> RecoveryState:
     bars_root = bars.get("bars") if isinstance(bars.get("bars"), dict) else bars
@@ -1264,35 +1261,41 @@ def render_unlocked_gym_editor(state: PlayerState) -> None:
 
     gym_names = ordered_gym_names()
 
-    if state.unlocked_gyms and set(state.unlocked_gyms) != set(st.session_state.gym_multiselect):
-        st.session_state.gym_multiselect = list(state.unlocked_gyms)
-    elif (not st.session_state.gym_multiselect) and st.session_state.manual_unlocked_gyms:
-        st.session_state.gym_multiselect = list(st.session_state.manual_unlocked_gyms)
+    if "gym_multiselect" not in st.session_state:
+        st.session_state.gym_multiselect = list(state.unlocked_gyms or st.session_state.manual_unlocked_gyms)
 
-    c1, c2 = st.columns([3, 1])
+    c1, c2, c3 = st.columns([3, 1, 1])
 
     with c1:
         selected = st.multiselect(
             "Select the gyms you currently have unlocked",
             options=gym_names,
-            key="gym_multiselect",
+            default=st.session_state.gym_multiselect,
+            key="gym_multiselect_widget",
         )
 
     with c2:
         highest_gym = st.selectbox(
             "Quick fill to highest unlocked gym",
             options=["-- none --"] + gym_names,
-            index=0 if st.session_state.highest_unlocked_gym_selector not in gym_names else (gym_names.index(st.session_state.highest_unlocked_gym_selector) + 1),
+            index=0,
             key="highest_unlocked_gym_selector",
         )
 
-        if highest_gym != "-- none --":
-            highest_idx = gym_names.index(highest_gym)
-            filled = gym_names[: highest_idx + 1]
-            st.session_state.gym_multiselect = filled
-            selected = filled
+    with c3:
+        apply_fill = st.button("Apply quick fill", use_container_width=True)
 
-    ordered_selection = [name for name in gym_names if name in selected]
+    if apply_fill and highest_gym != "-- none --":
+        highest_idx = gym_names.index(highest_gym)
+        selected = gym_names[: highest_idx + 1]
+        st.session_state.gym_multiselect = selected
+        st.session_state.manual_unlocked_gyms = selected
+        state.unlocked_gyms = selected
+        st.rerun()
+    else:
+        st.session_state.gym_multiselect = selected
+
+    ordered_selection = [name for name in gym_names if name in st.session_state.gym_multiselect]
     st.session_state.manual_unlocked_gyms = ordered_selection
     state.unlocked_gyms = ordered_selection
 
@@ -1300,7 +1303,6 @@ def render_unlocked_gym_editor(state: PlayerState) -> None:
         st.caption(f"Highest unlocked gym in planner: {ordered_selection[-1]}")
     else:
         st.warning("No unlocked gyms selected yet. The planner cannot choose a gym until this is set.")
-
 
 def render_today_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     today_instruction = build_daily_instruction(state, ratio, goal, date.today(), manual_mods)
