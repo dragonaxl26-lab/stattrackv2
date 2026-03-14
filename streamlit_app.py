@@ -274,6 +274,26 @@ def get_app_timezone_label() -> str:
         return TORN_TIMEZONE_LABEL
     return str(st.session_state.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME))
 
+def app_vs_tst_text(now_dt: Optional[datetime] = None) -> str:
+    now_dt = now_dt or local_now()
+    if bool(st.session_state.get("use_tct_times", False)):
+        return "Displayed times are currently using TST"
+
+    local_dt = to_local(now_dt)
+    tst_dt = to_tst(now_dt)
+    offset = tst_dt.utcoffset() - local_dt.utcoffset()
+    if offset == timedelta(0):
+        return f"{get_app_timezone_label()} matches TST right now"
+
+    direction = "behind" if offset > timedelta(0) else "ahead of"
+    delta = abs(offset)
+    hours = int(delta.total_seconds() // 3600)
+    minutes = int((delta.total_seconds() % 3600) // 60)
+    if minutes:
+        return f"{get_app_timezone_label()} is {hours}h {minutes}m {direction} TST right now"
+    return f"{get_app_timezone_label()} is {hours}h {direction} TST right now"
+
+
 def ct_vs_tst_text(now_dt: Optional[datetime] = None) -> str:
     now_dt = to_local(now_dt or local_now())
     offset = now_dt.utcoffset() or timedelta(0)
