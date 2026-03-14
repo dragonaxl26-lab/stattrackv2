@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as dtime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import math
@@ -186,7 +186,8 @@ class GoalSettings:
     fhc_allowed: bool = True
     cans_allowed: bool = True
     auto_schedule_happy_jumps: bool = True
-    auto_schedule_99k_jumps: bool = True
+    schedule_99k_jump: bool = False
+    scheduled_99k_jump_date: date = field(default_factory=lambda: date.today() + timedelta(days=7))
     skip_war_days: bool = True
     normal_day_start_happy: int = 5_000
     happy_jump_start_happy: int = 34_000
@@ -195,6 +196,8 @@ class GoalSettings:
     jump_stack_xanax_uses: int = 4
     allow_jump_on_war_days: bool = False
     jump_min_extra_gain_pct: float = 12.0
+    jump_prep_hours: float = 30.0
+    assumed_xanax_cooldown_hours: float = 8.0
 
 
 @dataclass
@@ -208,6 +211,13 @@ class JumpPlan:
     projected_jump_gain: float
     projected_gain_delta: float
     notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class JumpStep:
+    when: datetime
+    action: str
+    details: str
 
 
 @dataclass
@@ -887,21 +897,32 @@ def projected_start_happy_for_day(state: PlayerState, goal: GoalSettings, plan_d
     return goal.normal_day_start_happy
 
 
-def next_viable_jump_window(state: PlayerState, goal: GoalSettings, from_dt: Optional[datetime] = None) -> datetime:
-    now_dt = from_dt or datetime.now()
-    cooldown_ready = now_dt + timedelta(minutes=max(state.recovery.drug_cd_minutes, state.recovery.booster_cd_minutes))
-    candidate = next_quarter_hour(cooldown_ready)
+def selected_99k_execute_at(goal: GoalSettings) -> Optional[datetime]:
+    if not goal.schedule_99k_jump:
+        return None
+    return datetime.combine(goal.scheduled_99k_jump_date, dtime(hour=0, minute=15))
 
+
+def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> datetime:
+    now_dt = datetime.now()
+    prep_ready = now_dt + timedelta(minutes=max(state.recovery.drug_cd_minutes, state.recovery.booster_cd_minutes))
+    candidate = next_quarter_hour(prep_ready + timedelta(hours=goal.jump_prep_hours))
     while (not goal.allow_jump_on_war_days) and (candidate.date() in state.faction_war_days):
         candidate = next_quarter_hour(candidate + timedelta(days=1))
-
     return candidate
 
 
-def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, mods: TrainingModifiers) -> Optional[JumpPlan]:
-    if not goal.auto_schedule_happy_jumps and not goal.auto_schedule_99k_jumps:
-        return None
+def planned_xanax_stack_times(state: PlayerState, goal: GoalSettings, execute_at: datetime) -> List[datetime]:
+    first_candidate = execute_at - timedelta(hours=goal.jump_prep_hours)
+    earliest_allowed = datetime.now() + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
+    first = max(first_candidate, earliest_allowed)
+    times = [first]
+    for _ in range(1, int(goal.jump_stack_xanax_uses)):
+        times.append(times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours)))
+    return times
 
+
+def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, mods: TrainingModifiers) -> Optional[JumpPlan]:
     target_stat = choose_target_stat(state.stats, ratio)
     gym = best_gym_for_stat(state, target_stat)
     if gym is None:
@@ -914,32 +935,43 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
     jump_energy = goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
     happy_sim = simulate_training_block(state.stats, target_stat, gym, jump_energy, goal.happy_jump_start_happy, mods)
     super_sim = simulate_training_block(state.stats, target_stat, gym, jump_energy, goal.super_happy_jump_start_happy, mods)
-
-    chosen_type: Optional[str] = None
-    chosen_gain = 0.0
     threshold = 1 + goal.jump_min_extra_gain_pct / 100.0
 
-    if goal.auto_schedule_happy_jumps and happy_sim["total_gain"] > normal_sim["total_gain"] * threshold:
-        chosen_type = "happy_jump"
-        chosen_gain = float(happy_sim["total_gain"])
+    execute_at: Optional[datetime] = None
+    chosen_type: Optional[str] = None
+    chosen_gain = 0.0
+    notes: List[str] = []
 
-    if goal.auto_schedule_99k_jumps and goal.fhc_allowed and goal.cans_allowed and super_sim["total_gain"] > max(normal_sim["total_gain"], chosen_gain) * threshold:
+    manual_99k_dt = selected_99k_execute_at(goal)
+    if manual_99k_dt is not None:
         chosen_type = "super_happy_jump"
         chosen_gain = float(super_sim["total_gain"])
+        execute_at = manual_99k_dt
+        notes.append("99k jump date was manually selected by you.")
+    elif goal.auto_schedule_happy_jumps and happy_sim["total_gain"] > normal_sim["total_gain"] * threshold:
+        chosen_type = "happy_jump"
+        chosen_gain = float(happy_sim["total_gain"])
+        execute_at = next_viable_happy_jump_window(state, goal)
 
-    if chosen_type is None:
+    if chosen_type is None or execute_at is None:
         return None
 
-    execute_at = next_viable_jump_window(state, goal)
-    prep_start = execute_at - timedelta(hours=24)
-    notes = [
+    prep_start = execute_at - timedelta(hours=goal.jump_prep_hours)
+    xanax_times = planned_xanax_stack_times(state, goal, execute_at)
+    final_cd_clear = xanax_times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
+    if final_cd_clear > execute_at:
+        notes.append("Warning: current drug cooldown and stack timing push the final Xanax cooldown past the planned jump window.")
+    if state.recovery.booster_cd_minutes > 0 and datetime.now() + timedelta(minutes=state.recovery.booster_cd_minutes) > execute_at:
+        notes.append("Warning: booster cooldown is still active beyond the planned jump window.")
+    if execute_at.date() in state.faction_war_days and not goal.allow_jump_on_war_days:
+        notes.append("Warning: this planned jump falls on a war day.")
+
+    notes.extend([
+        f"Planner reserves about {goal.jump_prep_hours:.0f} hours of prep time for the jump.",
+        f"Planner assumes {goal.jump_stack_xanax_uses} Xanax with roughly {goal.assumed_xanax_cooldown_hours:.1f} hours between doses.",
         "Use the jump just after a 15-minute happy reset mark.",
-        f"Stack toward {goal.jump_stack_energy_target:,} energy during the prep window.",
-        f"Planner assumes {goal.jump_stack_xanax_uses} Xanax are reserved for the jump stack method.",
         "Train immediately after applying happy items / ecstasy, then use daily refill.",
-    ]
-    if chosen_type == "super_happy_jump":
-        notes.append("Because FHC/cans are allowed, the planner prefers the 99k route when its projected gain is materially better.")
+    ])
 
     return JumpPlan(
         jump_type=chosen_type,
@@ -954,19 +986,52 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
     )
 
 
+def build_jump_sequence(state: PlayerState, goal: GoalSettings, jump_plan: JumpPlan) -> List[JumpStep]:
+    steps: List[JumpStep] = []
+    xanax_times = planned_xanax_stack_times(state, goal, jump_plan.execute_at)
+
+    if state.recovery.current_energy > 0 and datetime.now().date() <= jump_plan.execute_at.date():
+        steps.append(JumpStep(datetime.now(), "Spend current energy", f"Use your current {state.recovery.current_energy} energy now unless you are already in the final save-for-jump window."))
+
+    for idx, use_time in enumerate(xanax_times, start=1):
+        steps.append(JumpStep(use_time, f"Take Xanax #{idx}", "Take the dose as soon as drug cooldown clears, then let the next cooldown run."))
+
+    ready_time = jump_plan.execute_at - timedelta(minutes=2)
+    steps.append(JumpStep(ready_time, "Be ready in gym", f"Open {jump_plan.gym_name} and have all items ready before the quarter-hour mark."))
+
+    if jump_plan.jump_type == "happy_jump":
+        steps.append(JumpStep(jump_plan.execute_at, "Use happy items", "Use your standard happy jump item set right after the quarter-hour reset."))
+        steps.append(JumpStep(jump_plan.execute_at + timedelta(seconds=10), "Use Ecstasy", "Use Ecstasy immediately after happy items."))
+    else:
+        steps.append(JumpStep(jump_plan.execute_at, "Execute 99k setup", "Use your planned 99k method/service on the selected day, then start training immediately."))
+
+    steps.append(JumpStep(jump_plan.execute_at + timedelta(seconds=20), "Train stacked energy", f"Train all stacked energy into {jump_plan.target_stat.title()} at {jump_plan.gym_name}."))
+
+    if state.recovery.daily_refill_enabled:
+        steps.append(JumpStep(jump_plan.execute_at + timedelta(minutes=1), "Use daily refill", "Use daily refill as soon as the stacked energy is spent."))
+        steps.append(JumpStep(jump_plan.execute_at + timedelta(minutes=1, seconds=10), "Train refill energy", f"Train refill energy into {jump_plan.target_stat.title()} at {jump_plan.gym_name}."))
+
+    if jump_plan.jump_type == "super_happy_jump" and (goal.fhc_allowed or goal.cans_allowed):
+        fill = []
+        if goal.fhc_allowed:
+            fill.append("FHC")
+        if goal.cans_allowed:
+            fill.append("cans")
+        steps.append(JumpStep(jump_plan.execute_at + timedelta(minutes=2), "Optional filler energy", f"Use approved {' and '.join(fill)} only if you want to push extra energy after the refill block."))
+
+    return sorted(steps, key=lambda x: x.when)
+
+
 def day_type_for_date(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, on_day: date, mods: TrainingModifiers) -> Tuple[str, Optional[JumpPlan]]:
-    if on_day in state.faction_war_days and not goal.allow_jump_on_war_days:
-        return "war", None
-
     jump_plan = build_jump_plan(state, ratio, goal, mods)
-    if jump_plan is None:
-        return "normal", None
+    if jump_plan is not None:
+        if on_day == jump_plan.execute_at.date():
+            return jump_plan.jump_type, jump_plan
+        if jump_plan.prep_start.date() <= on_day < jump_plan.execute_at.date():
+            return "prep", jump_plan
 
-    if on_day == jump_plan.execute_at.date():
-        return jump_plan.jump_type, jump_plan
-
-    if jump_plan.prep_start.date() <= on_day < jump_plan.execute_at.date():
-        return "prep", jump_plan
+    if on_day in state.faction_war_days and not goal.allow_jump_on_war_days:
+        return "war", jump_plan
 
     return "normal", jump_plan
 
@@ -974,13 +1039,10 @@ def day_type_for_date(state: PlayerState, ratio: RatioProfile, goal: GoalSetting
 def energy_budget_for_day(state: PlayerState, goal: GoalSettings, plan_day: date, mods: TrainingModifiers, day_type: str) -> int:
     if goal.skip_war_days and plan_day in state.faction_war_days and day_type not in {"happy_jump", "super_happy_jump"}:
         return 0
-
     if day_type == "prep":
         return min(state.recovery.max_energy, max(state.recovery.current_energy, 0))
-
     if day_type in {"happy_jump", "super_happy_jump"}:
         return goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
-
     return state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
 
 
@@ -991,48 +1053,11 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
     gym = best_gym_for_stat(state, target_stat)
 
     if day_type == "war":
-        return DailyInstruction(
-            plan_date=plan_day,
-            day_type="war",
-            target_stat="none",
-            gym_name="none",
-            estimated_energy=0,
-            recommended_trains=0,
-            estimated_gain=0.0,
-            start_happy=0,
-            end_happy=0,
-            notes=["Faction war day. Training skipped in baseline planner."],
-        )
-
+        return DailyInstruction(plan_day, "war", "none", "none", 0, 0, 0.0, 0, 0, ["Faction war day. Training skipped in baseline planner."])
     if gym is None:
-        return DailyInstruction(
-            plan_date=plan_day,
-            day_type="blocked",
-            target_stat=target_stat,
-            gym_name="unknown",
-            estimated_energy=0,
-            recommended_trains=0,
-            estimated_gain=0.0,
-            start_happy=0,
-            end_happy=0,
-            notes=["No unlocked gym found for target stat. Set your unlocked gyms in the UI."],
-        )
+        return DailyInstruction(plan_day, "blocked", target_stat, "unknown", 0, 0, 0.0, 0, 0, ["No unlocked gym found for target stat. Set your unlocked gyms in the UI."])
 
     day_energy = energy_budget_for_day(state, goal, plan_day, combined_mods, day_type)
-    if day_energy == 0:
-        return DailyInstruction(
-            plan_date=plan_day,
-            day_type="war",
-            target_stat="none",
-            gym_name="none",
-            estimated_energy=0,
-            recommended_trains=0,
-            estimated_gain=0.0,
-            start_happy=0,
-            end_happy=0,
-            notes=["Faction war day. Training skipped in baseline planner."],
-        )
-
     start_happy = projected_start_happy_for_day(state, goal, plan_day, day_type)
     sim = simulate_training_block(state.stats, target_stat, gym, day_energy, start_happy, combined_mods)
 
@@ -1043,34 +1068,20 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
         f"Expected happy loss per train: {expected_happy_loss_per_train(gym.energy_cost, combined_mods)}.",
         f"Effective gym gain multiplier for {target_stat}: {combined_mods.gym_multiplier_for_stat(target_stat):.3f}x.",
     ]
-
     if jump_plan is not None:
         notes.append(f"Next jump window: {jump_plan.execute_at.strftime('%Y-%m-%d %H:%M')}.")
-
     if day_type == "prep":
-        notes.append("Save most energy and continue stacking for the scheduled jump window.")
+        notes.append("Prep day: do not assume more drug uses are possible until cooldown and stack timing allow them.")
     elif day_type == "happy_jump":
-        notes.append("Execute a standard happy jump just after the quarter-hour reset, then use daily refill and train again.")
+        notes.append("Happy jump day: follow the timed action planner below.")
     elif day_type == "super_happy_jump":
-        notes.append("Execute the 99k route just after the quarter-hour reset, then refill and use allowed fillers if needed.")
+        notes.append("99k jump day: this was either manually scheduled or selected by your settings.")
     else:
         notes.append("Normal training day.")
-
     if combined_mods.detected_sources:
         notes.append("Detected modifiers: " + "; ".join(combined_mods.detected_sources[:4]))
 
-    return DailyInstruction(
-        plan_date=plan_day,
-        day_type=day_type,
-        target_stat=target_stat,
-        gym_name=gym.name,
-        estimated_energy=day_energy,
-        recommended_trains=sim["trains"],
-        estimated_gain=sim["total_gain"],
-        start_happy=start_happy,
-        end_happy=int(sim["ending_happy"]),
-        notes=notes,
-    )
+    return DailyInstruction(plan_day, day_type, target_stat, gym.name, day_energy, sim["trains"], sim["total_gain"], start_happy, int(sim["ending_happy"]), notes)
 
 
 def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 14) -> List[DailyInstruction]:
@@ -1094,7 +1105,6 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
         )
         instruction = build_daily_instruction(projected_state, ratio, goal, plan_day, manual_mods)
         plan.append(instruction)
-
         if instruction.target_stat in STAT_KEYS and instruction.estimated_gain > 0:
             projected_stats = projected_stats.with_gain(instruction.target_stat, instruction.estimated_gain)
 
@@ -1140,6 +1150,8 @@ def init_state() -> None:
         st.session_state.gym_multiselect = []
     if "highest_unlocked_gym_selector" not in st.session_state:
         st.session_state.highest_unlocked_gym_selector = "-- none --"
+    if "manual_99k_jump_date" not in st.session_state:
+        st.session_state.manual_99k_jump_date = date.today() + timedelta(days=7)
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -1175,7 +1187,7 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     with c5:
         auto_schedule_happy_jumps = st.checkbox("Auto-schedule happy jumps", value=goal.auto_schedule_happy_jumps)
     with c6:
-        auto_schedule_99k_jumps = st.checkbox("Schedule 99k jumps", value=goal.auto_schedule_99k_jumps)
+        schedule_99k_jump = st.checkbox("Schedule 99k jump", value=goal.schedule_99k_jump)
 
     skip_war_days = st.checkbox("Skip war days", value=goal.skip_war_days)
 
@@ -1195,7 +1207,17 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     with c12:
         allow_jump_on_war_days = st.checkbox("Allow jumps on war days", value=goal.allow_jump_on_war_days)
 
-    jump_min_extra_gain_pct = st.number_input("Minimum extra gain % to prefer a jump", min_value=0.0, value=float(goal.jump_min_extra_gain_pct), step=1.0)
+    c13, c14, c15 = st.columns(3)
+    with c13:
+        jump_min_extra_gain_pct = st.number_input("Minimum extra gain % to prefer a jump", min_value=0.0, value=float(goal.jump_min_extra_gain_pct), step=1.0)
+    with c14:
+        jump_prep_hours = st.number_input("Jump prep hours", min_value=1.0, value=float(goal.jump_prep_hours), step=1.0)
+    with c15:
+        assumed_xanax_cooldown_hours = st.number_input("Assumed Xanax cooldown hours", min_value=1.0, value=float(goal.assumed_xanax_cooldown_hours), step=0.5)
+
+    scheduled_99k_jump_date = goal.scheduled_99k_jump_date
+    if schedule_99k_jump:
+        scheduled_99k_jump_date = st.date_input("Planned 99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
 
     return GoalSettings(
         target_total_stats=float(target_total),
@@ -1203,7 +1225,8 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         fhc_allowed=fhc_allowed,
         cans_allowed=cans_allowed,
         auto_schedule_happy_jumps=auto_schedule_happy_jumps,
-        auto_schedule_99k_jumps=auto_schedule_99k_jumps,
+        schedule_99k_jump=schedule_99k_jump,
+        scheduled_99k_jump_date=scheduled_99k_jump_date,
         skip_war_days=skip_war_days,
         normal_day_start_happy=int(normal_day_start_happy),
         happy_jump_start_happy=int(happy_jump_start_happy),
@@ -1212,6 +1235,8 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         jump_stack_xanax_uses=int(jump_stack_xanax_uses),
         allow_jump_on_war_days=allow_jump_on_war_days,
         jump_min_extra_gain_pct=float(jump_min_extra_gain_pct),
+        jump_prep_hours=float(jump_prep_hours),
+        assumed_xanax_cooldown_hours=float(assumed_xanax_cooldown_hours),
     )
 
 
@@ -1259,6 +1284,35 @@ def render_manual_modifier_controls() -> TrainingModifiers:
         energy_regen_bonus_pct=float(energy_regen_bonus),
         detected_sources=sources,
     )
+
+
+def render_progress_section(state: PlayerState, goal: GoalSettings, ratio: RatioProfile) -> None:
+    st.subheader("Progress")
+    total_progress = min(1.0, state.stats.total() / max(goal.target_total_stats, 1.0))
+    st.write(f"Overall goal: {state.stats.total():,.0f} / {goal.target_total_stats:,.0f}")
+    st.progress(total_progress)
+
+    phase = milestone_phase(state.stats)
+    if phase != "baldr_ratio":
+        cap = current_milestone_cap(state.stats) or 400_000
+        st.write(f"Current milestone phase: {phase} (target {cap:,} each stat)")
+        cols = st.columns(4)
+        for idx, stat_key in enumerate(STAT_KEYS):
+            value = state.stats.get(stat_key)
+            with cols[idx]:
+                st.caption(f"{stat_key.title()}: {value:,.0f} / {cap:,.0f}")
+                st.progress(min(1.0, value / max(cap, 1.0)))
+    else:
+        st.write("Baldr ratio maintenance")
+        current_ratio = calculate_current_ratio(state.stats)
+        target_ratio = ratio.as_percent_map()
+        cols = st.columns(4)
+        for idx, stat_key in enumerate(STAT_KEYS):
+            with cols[idx]:
+                diff = abs(current_ratio[stat_key] - target_ratio[stat_key])
+                closeness = max(0.0, 1.0 - diff / max(target_ratio[stat_key], 1.0))
+                st.caption(f"{stat_key.title()}: {current_ratio[stat_key]:.2f}% / {target_ratio[stat_key]:.2f}%")
+                st.progress(closeness)
 
 
 def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
@@ -1390,6 +1444,65 @@ def render_jump_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSetting
         st.write(f"- {note}")
 
 
+def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> List[JumpStep]:
+    combined_mods = state.training_modifiers.merge(manual_mods)
+    today_type, jump_plan = day_type_for_date(state, ratio, goal, date.today(), combined_mods)
+    target_stat = choose_target_stat(state.stats, ratio)
+    gym = best_gym_for_stat(state, target_stat)
+    now_dt = datetime.now()
+    actions: List[JumpStep] = []
+
+    if gym is None:
+        return actions
+
+    if jump_plan is not None and today_type in {"prep", "happy_jump", "super_happy_jump"}:
+        return [step for step in build_jump_sequence(state, goal, jump_plan) if step.when.date() == date.today()]
+
+    actions.append(JumpStep(now_dt, "Train current energy", f"Train your current {state.recovery.current_energy} energy into {target_stat.title()} at {gym.name}."))
+    if state.recovery.drug_cd_minutes > 0:
+        actions.append(JumpStep(now_dt + timedelta(minutes=state.recovery.drug_cd_minutes), "Drug cooldown clears", "You cannot take another Xanax until this time."))
+    else:
+        actions.append(JumpStep(now_dt, "Drug available now", "You can take your next Xanax whenever you decide to use it."))
+    if state.recovery.daily_refill_enabled:
+        actions.append(JumpStep(now_dt + timedelta(minutes=10), "Use daily refill after main block", "Use refill after your main energy block if you are training today."))
+    return actions
+
+
+def render_daily_planner_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    st.subheader("Daily planner")
+    steps = build_today_action_plan(state, ratio, goal, manual_mods)
+    if not steps:
+        st.write("No timed actions available yet.")
+        return
+    rows = []
+    for idx, step in enumerate(sorted(steps, key=lambda x: x.when), start=1):
+        rows.append({
+            "Step": idx,
+            "When": step.when.strftime("%Y-%m-%d %H:%M"),
+            "Action": step.action,
+            "Details": step.details,
+        })
+    st.dataframe(rows, use_container_width=True)
+
+
+def render_jump_sequence_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    st.subheader("Jump sequence")
+    combined_mods = state.training_modifiers.merge(manual_mods)
+    jump_plan = build_jump_plan(state, ratio, goal, combined_mods)
+    if jump_plan is None:
+        st.write("No jump is currently scheduled.")
+        return
+    rows = []
+    for idx, step in enumerate(build_jump_sequence(state, goal, jump_plan), start=1):
+        rows.append({
+            "Step": idx,
+            "When": step.when.strftime("%Y-%m-%d %H:%M"),
+            "Action": step.action,
+            "Details": step.details,
+        })
+    st.dataframe(rows, use_container_width=True)
+
+
 def render_plan_table(plan: List[DailyInstruction]) -> None:
     st.subheader("Plan preview")
     rows = []
@@ -1514,11 +1627,14 @@ def main() -> None:
     st.session_state.ratio_profile = render_ratio_controls(st.session_state.ratio_profile)
     manual_mods = render_manual_modifier_controls()
 
+    render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
     render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
     render_unlocked_gym_editor(player_state)
     render_war_calendar_editor(player_state)
     render_today_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
     render_jump_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+    render_daily_planner_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+    render_jump_sequence_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
 
     plan = build_plan_preview(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods, days=preview_days)
     render_plan_table(plan)
@@ -1526,10 +1642,10 @@ def main() -> None:
     render_gain_debug_panel(player_state, st.session_state.goal_settings, st.session_state.ratio_profile, manual_mods)
 
     st.subheader("Next implementation targets")
-    st.write("1. Add exact item sequencing for candy / EDVD / ecstasy / refill / filler energy.")
+    st.write("1. Add alternate 99k recipes and exact item counts for your preferred method.")
     st.write("2. Add richer faction upgrade parsing from the live upgrades payload.")
-    st.write("3. Add milestones and long-range calendar projection with day-by-day stat carry-forward.")
-    st.write("4. Add export / save functionality for the training plan.")
+    st.write("3. Add export / save functionality for the training plan.")
+    st.write("4. Add calendar import / reminder export for jump schedules.")
 
 
 if __name__ == "__main__":
