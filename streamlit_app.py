@@ -66,6 +66,11 @@ class PlayerStats:
     def get(self, stat_key: str) -> float:
         return self.as_dict().get(stat_key, 0.0)
 
+    def with_gain(self, stat_key: str, gain: float) -> "PlayerStats":
+        values = self.as_dict()
+        values[stat_key] = values.get(stat_key, 0.0) + gain
+        return PlayerStats(**values)
+
 
 @dataclass
 class RatioProfile:
@@ -180,7 +185,8 @@ class GoalSettings:
     target_date: date = field(default_factory=lambda: date.today() + timedelta(days=210))
     fhc_allowed: bool = True
     cans_allowed: bool = True
-    auto_schedule_jumps: bool = True
+    auto_schedule_happy_jumps: bool = True
+    auto_schedule_99k_jumps: bool = True
     skip_war_days: bool = True
     normal_day_start_happy: int = 5_000
     happy_jump_start_happy: int = 34_000
@@ -771,15 +777,35 @@ def milestone_phase(stats: PlayerStats) -> str:
     return "baldr_ratio"
 
 
+
+def current_milestone_cap(stats: PlayerStats) -> Optional[int]:
+    phase = milestone_phase(stats)
+    if phase == "all_to_400k":
+        return 400_000
+    if phase == "all_to_600k":
+        return 600_000
+    if phase == "all_to_800k":
+        return 800_000
+    return None
+
+
+
 def choose_target_stat(stats: PlayerStats, ratio: RatioProfile) -> str:
     phase = milestone_phase(stats)
     stat_map = stats.as_dict()
     if phase != "baldr_ratio":
+        cap = current_milestone_cap(stats)
+        eligible = {k: v for k, v in stat_map.items() if cap is not None and v < cap}
+        if eligible:
+            # During milestone phases, finish the stat closest to the cap first.
+            return max(eligible, key=eligible.get)
         return min(stat_map, key=stat_map.get)
+
     current_ratio = calculate_current_ratio(stats)
     target_ratio = ratio.as_percent_map()
     deficits = {stat_key: target_ratio[stat_key] - current_ratio[stat_key] for stat_key in STAT_KEYS}
     return max(deficits, key=deficits.get)
+
 
 
 def get_unlocked_gyms(state: PlayerState) -> List[Gym]:
@@ -873,7 +899,7 @@ def next_viable_jump_window(state: PlayerState, goal: GoalSettings, from_dt: Opt
 
 
 def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, mods: TrainingModifiers) -> Optional[JumpPlan]:
-    if not goal.auto_schedule_jumps:
+    if not goal.auto_schedule_happy_jumps and not goal.auto_schedule_99k_jumps:
         return None
 
     target_stat = choose_target_stat(state.stats, ratio)
@@ -893,11 +919,11 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
     chosen_gain = 0.0
     threshold = 1 + goal.jump_min_extra_gain_pct / 100.0
 
-    if happy_sim["total_gain"] > normal_sim["total_gain"] * threshold:
+    if goal.auto_schedule_happy_jumps and happy_sim["total_gain"] > normal_sim["total_gain"] * threshold:
         chosen_type = "happy_jump"
         chosen_gain = float(happy_sim["total_gain"])
 
-    if goal.fhc_allowed and goal.cans_allowed and super_sim["total_gain"] > max(normal_sim["total_gain"], chosen_gain) * threshold:
+    if goal.auto_schedule_99k_jumps and goal.fhc_allowed and goal.cans_allowed and super_sim["total_gain"] > max(normal_sim["total_gain"], chosen_gain) * threshold:
         chosen_type = "super_happy_jump"
         chosen_gain = float(super_sim["total_gain"])
 
@@ -1048,10 +1074,31 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
 
 
 def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 14) -> List[DailyInstruction]:
-    return [
-        build_daily_instruction(state, ratio, goal, date.today() + timedelta(days=offset), manual_mods)
-        for offset in range(days)
-    ]
+    plan: List[DailyInstruction] = []
+    projected_stats = state.stats
+
+    for offset in range(days):
+        plan_day = date.today() + timedelta(days=offset)
+        projected_state = PlayerState(
+            stats=projected_stats,
+            recovery=state.recovery,
+            unlocked_gyms=list(state.unlocked_gyms),
+            faction_war_days=list(state.faction_war_days),
+            torn_name=state.torn_name,
+            torn_id=state.torn_id,
+            faction_id=state.faction_id,
+            faction_name=state.faction_name,
+            training_modifiers=state.training_modifiers,
+            api_notes=list(state.api_notes),
+            last_sync=state.last_sync,
+        )
+        instruction = build_daily_instruction(projected_state, ratio, goal, plan_day, manual_mods)
+        plan.append(instruction)
+
+        if instruction.target_stat in STAT_KEYS and instruction.estimated_gain > 0:
+            projected_stats = projected_stats.with_gain(instruction.target_stat, instruction.estimated_gain)
+
+    return plan
 
 
 def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> Optional[int]:
@@ -1126,9 +1173,11 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     with c4:
         cans_allowed = st.checkbox("Cans allowed", value=goal.cans_allowed)
     with c5:
-        auto_schedule_jumps = st.checkbox("Auto-schedule jumps", value=goal.auto_schedule_jumps)
+        auto_schedule_happy_jumps = st.checkbox("Auto-schedule happy jumps", value=goal.auto_schedule_happy_jumps)
     with c6:
-        skip_war_days = st.checkbox("Skip war days", value=goal.skip_war_days)
+        auto_schedule_99k_jumps = st.checkbox("Schedule 99k jumps", value=goal.auto_schedule_99k_jumps)
+
+    skip_war_days = st.checkbox("Skip war days", value=goal.skip_war_days)
 
     c7, c8, c9 = st.columns(3)
     with c7:
@@ -1153,7 +1202,8 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         target_date=target_date,
         fhc_allowed=fhc_allowed,
         cans_allowed=cans_allowed,
-        auto_schedule_jumps=auto_schedule_jumps,
+        auto_schedule_happy_jumps=auto_schedule_happy_jumps,
+        auto_schedule_99k_jumps=auto_schedule_99k_jumps,
         skip_war_days=skip_war_days,
         normal_day_start_happy=int(normal_day_start_happy),
         happy_jump_start_happy=int(happy_jump_start_happy),
