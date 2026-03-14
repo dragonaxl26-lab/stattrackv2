@@ -267,6 +267,13 @@ def fmt_tst(dt: datetime) -> str:
     return to_tst(dt).strftime("%Y-%m-%d %H:%M TST")
 
 
+
+
+def get_app_timezone_label() -> str:
+    if getattr(st, "session_state", None) is not None and bool(st.session_state.get("use_tct_times", False)):
+        return TORN_TIMEZONE_LABEL
+    return str(st.session_state.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME))
+
 def ct_vs_tst_text(now_dt: Optional[datetime] = None) -> str:
     now_dt = to_local(now_dt or local_now())
     offset = now_dt.utcoffset() or timedelta(0)
