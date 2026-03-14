@@ -379,6 +379,31 @@ def _extract_strings(value: Any) -> List[str]:
     return strings
 
 
+def _find_first_numeric_for_key(value: Any, target_key: str) -> Optional[float]:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower() == target_key.lower():
+                if isinstance(child, (int, float, str)):
+                    parsed = _safe_float(child, default=float("nan"))
+                    if not math.isnan(parsed):
+                        return parsed
+                if isinstance(child, dict):
+                    for nested_key in ("value", "current", "amount", "total"):
+                        if nested_key in child:
+                            parsed = _safe_float(child.get(nested_key), default=float("nan"))
+                            if not math.isnan(parsed):
+                                return parsed
+            found = _find_first_numeric_for_key(child, target_key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_first_numeric_for_key(child, target_key)
+            if found is not None:
+                return found
+    return None
+
+
 def _extract_gym_names_from_payloads(payloads: Iterable[Dict[str, Any]]) -> List[str]:
     found: set[str] = set()
     valid_names = set(ordered_gym_names())
@@ -456,17 +481,25 @@ def _parse_profile(profile: Dict[str, Any]) -> Tuple[str, Optional[int], Optiona
 
 def _parse_battlestats(payload: Dict[str, Any]) -> PlayerStats:
     stats_root = payload
-    if isinstance(payload.get("battlestats"), dict):
-        stats_root = payload["battlestats"]
-    elif isinstance(payload.get("battle_stats"), dict):
-        stats_root = payload["battle_stats"]
-    elif isinstance(payload.get("stats"), dict):
-        stats_root = payload["stats"]
+    for key in ("battlestats", "battle_stats", "stats"):
+        if isinstance(payload.get(key), dict):
+            stats_root = payload[key]
+            break
+
+    def get_stat(stat_name: str) -> float:
+        direct = _first_present(stats_root, [(stat_name,), (f"{stat_name}_info", "value")], default=None)
+        if direct is not None:
+            return _safe_float(direct, 0.0)
+        recursive = _find_first_numeric_for_key(payload, stat_name)
+        if recursive is not None:
+            return float(recursive)
+        return 0.0
+
     return PlayerStats(
-        strength=_safe_float(_first_present(stats_root, [("strength",), ("strength_info", "value")], default=0.0), 0.0),
-        speed=_safe_float(_first_present(stats_root, [("speed",), ("speed_info", "value")], default=0.0), 0.0),
-        defense=_safe_float(_first_present(stats_root, [("defense",), ("defense_info", "value")], default=0.0), 0.0),
-        dexterity=_safe_float(_first_present(stats_root, [("dexterity",), ("dexterity_info", "value")], default=0.0), 0.0),
+        strength=get_stat("strength"),
+        speed=get_stat("speed"),
+        defense=get_stat("defense"),
+        dexterity=get_stat("dexterity"),
     )
 
 
@@ -686,6 +719,9 @@ def fetch_player_state_from_api(api_key: str, manual_unlocked_gyms: Optional[Lis
         api_notes.append("Detected training modifiers from API: " + "; ".join(training_modifiers.detected_sources))
     else:
         api_notes.append("No training modifiers were auto-detected. Use manual overrides if needed.")
+
+    if stats.total() <= 0:
+        api_notes.append("Battle stats came back as zero. This usually means the API key does not include limited access to /user/battlestats, or Torn returned a battlestats shape this parser still does not recognize.")
 
     return PlayerState(
         torn_name=torn_name,
@@ -1036,6 +1072,8 @@ def init_state() -> None:
         st.session_state.ratio_profile = RatioProfile()
     if "manual_unlocked_gyms" not in st.session_state:
         st.session_state.manual_unlocked_gyms = []
+    if "gym_multiselect" not in st.session_state:
+        st.session_state.gym_multiselect = []
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -1344,6 +1382,13 @@ def main() -> None:
         if st.button("Sync from Torn API", use_container_width=True):
             try:
                 st.session_state.player_state = fetch_player_state_from_api(api_key=api_key, manual_unlocked_gyms=st.session_state.manual_unlocked_gyms)
+                synced = st.session_state.player_state
+                if synced.unlocked_gyms:
+                    st.session_state.manual_unlocked_gyms = list(synced.unlocked_gyms)
+                    st.session_state.gym_multiselect = list(synced.unlocked_gyms)
+                base_happy = synced.recovery.max_happy or synced.recovery.current_happy
+                if base_happy > 0:
+                    st.session_state.goal_settings.normal_day_start_happy = int(base_happy)
                 st.success("Profile synced from Torn API.")
             except Exception as exc:
                 st.error(f"Sync failed: {exc}")
@@ -1352,6 +1397,8 @@ def main() -> None:
             demo_state = build_demo_player_state()
             st.session_state.player_state = demo_state
             st.session_state.manual_unlocked_gyms = list(demo_state.unlocked_gyms)
+            st.session_state.gym_multiselect = list(demo_state.unlocked_gyms)
+            st.session_state.goal_settings.normal_day_start_happy = int(demo_state.recovery.max_happy or demo_state.recovery.current_happy or st.session_state.goal_settings.normal_day_start_happy)
             st.success("Demo profile loaded.")
 
     if st.session_state.player_state is None:
