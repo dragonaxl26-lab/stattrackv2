@@ -51,9 +51,19 @@ DEFAULT_APP_TIMEZONE_NAME = "America/Chicago"
 DEFAULT_APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
 TORN_TIMEZONE = ZoneInfo("UTC")
 TORN_TIMEZONE_LABEL = "TST (UTC)"
+APP_TIMEZONE = ZoneInfo(DEFAULT_APP_TIMEZONE_NAME)
 ALL_TIMEZONE_OPTIONS = sorted(available_timezones())
 PERSISTENCE_PATH = Path(".streamlit/torn_planner_persistence.json")
 
+
+
+
+def set_app_timezone(timezone_name: Optional[str]) -> None:
+    global APP_TIMEZONE
+    try:
+        APP_TIMEZONE = ZoneInfo(timezone_name or DEFAULT_APP_TIMEZONE_NAME)
+    except Exception:
+        APP_TIMEZONE = ZoneInfo(DEFAULT_APP_TIMEZONE_NAME)
 
 def _api_namespace(api_key: str) -> Optional[str]:
     key = (api_key or "").strip()
@@ -2053,6 +2063,7 @@ def init_state() -> None:
         st.session_state.preview_days = 30
     if "display_timezone_name" not in st.session_state:
         st.session_state.display_timezone_name = DEFAULT_APP_TIMEZONE_NAME
+    set_app_timezone(st.session_state.display_timezone_name)
     if "use_tct_times" not in st.session_state:
         st.session_state.use_tct_times = False
     if "api_key_input" not in st.session_state:
@@ -2102,6 +2113,7 @@ def render_sidebar() -> Tuple[str, int]:
         help="Choose the timezone used for displayed planner times and manual scheduling inputs when TCT override is off.",
     )
     st.session_state.display_timezone_name = selected_timezone
+    set_app_timezone(st.session_state.display_timezone_name)
     st.session_state.use_tct_times = st.sidebar.checkbox(
         "Use TCT for displayed times",
         value=bool(st.session_state.use_tct_times),
