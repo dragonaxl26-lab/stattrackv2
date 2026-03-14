@@ -1939,6 +1939,8 @@ def init_state() -> None:
         st.session_state.manual_unlocked_gyms = []
     if "gym_multiselect" not in st.session_state:
         st.session_state.gym_multiselect = []
+    if "selected_calendar_date" not in st.session_state:
+        st.session_state.selected_calendar_date = None
     if "highest_unlocked_gym_selector" not in st.session_state:
         st.session_state.highest_unlocked_gym_selector = "-- none --"
     if "manual_99k_jump_date" not in st.session_state:
@@ -2737,6 +2739,59 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
     return actions
 
 
+
+
+def build_action_plan_for_date(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, plan_day: date, instruction: Optional[DailyInstruction] = None) -> List[JumpStep]:
+    if plan_day == local_today():
+        return build_today_action_plan(state, ratio, goal, manual_mods)
+
+    combined_mods = state.training_modifiers.merge(manual_mods)
+    instruction = instruction or build_daily_instruction(state, ratio, goal, plan_day, manual_mods)
+    day_type, jump_plan = day_type_for_date(state, ratio, goal, plan_day, combined_mods)
+    target_stat = instruction.target_stat if instruction.target_stat != "none" else choose_target_stat(state.stats, ratio)
+    gym = GYM_INDEX.get(instruction.gym_name) or best_gym_for_stat(state, target_stat)
+    day_start = datetime.combine(plan_day, dtime(hour=8, minute=0), tzinfo=APP_TIMEZONE)
+    actions: List[JumpStep] = []
+
+    if instruction.day_type == "war":
+        return [JumpStep(day_start, "War / non-training day", "Training is skipped today because this date is marked as a war or non-training day.")]
+    if gym is None:
+        return [JumpStep(day_start, "Gym selection needed", "No valid gym is available for this day. Set your unlocked gyms first.")]
+    if jump_plan is not None and day_type in {"prep", "happy_jump", "super_happy_jump"}:
+        day_steps = [step for step in build_jump_sequence(state, goal, jump_plan) if to_local(step.when).date() == plan_day]
+        if day_steps:
+            return day_steps
+
+    actions.append(JumpStep(day_start, "Start main training block", f"Train {instruction.target_stat.title()} in {gym.name}. Planned energy for the day is about {instruction.estimated_energy:,}."))
+
+    # Assumed baseline schedule for future normal days.
+    if instruction.day_type == "normal":
+        if state.recovery.current_energy > 0:
+            actions.append(JumpStep(day_start, "Spend opening energy", f"Use your opening energy toward {instruction.target_stat.title()} at {gym.name}."))
+        if state.recovery.daily_refill_enabled:
+            refill_at = datetime.combine(plan_day, dtime(hour=0, minute=1), tzinfo=TORN_TIMEZONE).astimezone(APP_TIMEZONE)
+            actions.append(JumpStep(refill_at, "TST refill reset", f"Daily refill resets at {fmt_tst(refill_at)} / {fmt_local(refill_at)}."))
+            actions.append(JumpStep(refill_at + timedelta(minutes=1), "Use daily refill", f"Use the daily refill and train that energy into {instruction.target_stat.title()} at {gym.name}."))
+        # Three baseline xanax windows.
+        xanax_times = [
+            datetime.combine(plan_day, dtime(hour=8, minute=5), tzinfo=APP_TIMEZONE),
+            datetime.combine(plan_day, dtime(hour=15, minute=5), tzinfo=APP_TIMEZONE),
+            datetime.combine(plan_day, dtime(hour=22, minute=5), tzinfo=APP_TIMEZONE),
+        ]
+        for idx, when in enumerate(xanax_times, start=1):
+            actions.append(JumpStep(when, f"Baseline Xanax #{idx}", f"Take Xanax #{idx} if you are following the baseline plan, then train the extra {state.recovery.xanax_energy} energy in {gym.name}."))
+        end_dt = datetime.combine(plan_day, dtime(hour=23, minute=59), tzinfo=APP_TIMEZONE)
+        natural_e = natural_energy_between(state, combined_mods, day_start, end_dt)
+        actions.append(JumpStep(end_dt, "Natural regen through end of day", f"About {natural_e} natural energy will regenerate through the end of this day at your current regen rate."))
+    elif instruction.day_type == "prep":
+        actions.append(JumpStep(day_start + timedelta(minutes=5), "Hold most energy", "Save as much energy as possible today so the scheduled jump can go off on time."))
+        if jump_plan is not None:
+            actions.append(JumpStep(jump_plan.execute_at - timedelta(hours=1), "Final jump prep check", f"Confirm items, cooldowns, and stack before the jump at {fmt_local(jump_plan.execute_at)}."))
+    else:
+        actions.append(JumpStep(day_start + timedelta(minutes=5), "Follow jump sequence", "This day is part of a jump sequence. Use the timed steps shown here in order."))
+
+    return sorted(actions, key=lambda x: x.when)
+
 def render_daily_planner_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     st.subheader("Daily planner")
     steps = build_today_action_plan(state, ratio, goal, manual_mods)
@@ -3009,14 +3064,18 @@ def _calendar_day_html(item: DailyInstruction, today: date) -> str:
     """
 
 
-def render_calendar_tab(plan: List[DailyInstruction]) -> None:
+def render_calendar_tab(plan: List[DailyInstruction], state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     st.subheader("Training calendar")
+    st.caption("Click a day card to open that day’s minute-by-minute action plan.")
     if not plan:
         st.info("No calendar data available yet.")
         return
 
     today = local_today()
     plan_map = {item.plan_date: item for item in plan}
+    if st.session_state.selected_calendar_date is None and plan:
+        st.session_state.selected_calendar_date = (today if today in plan_map else plan[0].plan_date).isoformat()
+
     first_day = plan[0].plan_date
     last_day = plan[-1].plan_date
     grid_start = first_day - timedelta(days=first_day.weekday())
@@ -3038,8 +3097,39 @@ def render_calendar_tab(plan: List[DailyInstruction]) -> None:
                     st.markdown('<div class="calendar-empty"></div>', unsafe_allow_html=True)
                 else:
                     st.markdown(_calendar_day_html(item, today), unsafe_allow_html=True)
+                    if st.button("Open day", key=f"cal_open_{day.isoformat()}", use_container_width=True):
+                        st.session_state.selected_calendar_date = day.isoformat()
         cursor += timedelta(days=7)
 
+    selected_day_str = st.session_state.selected_calendar_date or plan[0].plan_date.isoformat()
+    try:
+        selected_day = date.fromisoformat(selected_day_str)
+    except ValueError:
+        selected_day = plan[0].plan_date
+        st.session_state.selected_calendar_date = selected_day.isoformat()
+
+    selected_instruction = plan_map.get(selected_day)
+    st.markdown("---")
+    if selected_instruction is None:
+        st.info("Select a day in the calendar to see its action plan.")
+        return
+
+    st.subheader(f"Day details — {selected_day.strftime('%a, %b %d')}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Day type", selected_instruction.day_type.replace('_', ' ').title())
+    c2.metric("Gym", selected_instruction.gym_name)
+    c3.metric("Train", selected_instruction.target_stat.title() if selected_instruction.target_stat != 'none' else 'None')
+    c4.metric("Planned energy", f"{selected_instruction.estimated_energy:,}")
+    steps = build_action_plan_for_date(state, ratio, goal, manual_mods, selected_day, selected_instruction)
+    rows = []
+    for idx, step in enumerate(sorted(steps, key=lambda x: x.when), start=1):
+        rows.append({
+            "Step": idx,
+            "When": fmt_local(step.when),
+            "Action": step.action,
+            "Details": step.details,
+        })
+    st.dataframe(rows, use_container_width=True)
 
 def render_setup_tab() -> TrainingModifiers:
     st.subheader("Planner setup")
@@ -3119,7 +3209,7 @@ def main() -> None:
         render_unlocked_gym_editor(player_state)
 
     with tabs[4]:
-        render_calendar_tab(plan)
+        render_calendar_tab(plan, player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         st.subheader("Today’s timed actions")
         render_daily_planner_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         with st.expander("Jump sequence"):
