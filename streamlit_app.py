@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict, is_dataclass
 from datetime import date, datetime, timedelta, time as dtime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 import json
 import math
@@ -47,10 +47,11 @@ DEFAULT_EXPECTED_HAPPY_LOSS_RATIO = 0.50
 TORN_V2_BASE_URL = "https://api.torn.com/v2"
 TORN_API_TIMEOUT_SECONDS = 20
 TORN_API_COMMENT = "torn-stat-tracker-v2"
-APP_TIMEZONE = ZoneInfo("America/Chicago")
-APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
+DEFAULT_APP_TIMEZONE_NAME = "America/Chicago"
+DEFAULT_APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
 TORN_TIMEZONE = ZoneInfo("UTC")
 TORN_TIMEZONE_LABEL = "TST (UTC)"
+ALL_TIMEZONE_OPTIONS = sorted(available_timezones())
 PERSISTENCE_PATH = Path(".streamlit/torn_planner_persistence.json")
 
 
@@ -119,6 +120,8 @@ def _current_persistence_payload() -> Dict[str, Any]:
         "manual_99k_jump_entries": st.session_state.get("manual_99k_jump_entries", []),
         "player_state": st.session_state.get("player_state"),
         "preview_days": st.session_state.get("preview_days", 30),
+        "display_timezone_name": st.session_state.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME),
+        "use_tct_times": st.session_state.get("use_tct_times", False),
     }
 
 
@@ -152,6 +155,8 @@ def reset_runtime_state(keep_api_fields: bool = True) -> None:
     st.session_state.manual_99k_jump_date = local_today() + timedelta(days=7)
     st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
     st.session_state.preview_days = 30
+    st.session_state.display_timezone_name = DEFAULT_APP_TIMEZONE_NAME
+    st.session_state.use_tct_times = False
     st.session_state._persistence_error = None
     if keep_api_fields:
         st.session_state._loaded_persistence_namespace = loaded_namespace
@@ -171,6 +176,8 @@ def _apply_persistent_payload(payload: Dict[str, Any]) -> None:
     st.session_state.highest_unlocked_gym_selector = payload.get("highest_unlocked_gym_selector", "-- none --")
     st.session_state.manual_99k_jump_entries = list(payload.get("manual_99k_jump_entries", st.session_state.get("manual_99k_jump_entries", [])))
     st.session_state.preview_days = int(payload.get("preview_days", 30))
+    st.session_state.display_timezone_name = payload.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME)
+    st.session_state.use_tct_times = bool(payload.get("use_tct_times", False))
 
 
 def load_persistent_state_for_api(api_key: str) -> None:
@@ -2044,6 +2051,10 @@ def init_state() -> None:
         st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
     if "preview_days" not in st.session_state:
         st.session_state.preview_days = 30
+    if "display_timezone_name" not in st.session_state:
+        st.session_state.display_timezone_name = DEFAULT_APP_TIMEZONE_NAME
+    if "use_tct_times" not in st.session_state:
+        st.session_state.use_tct_times = False
     if "api_key_input" not in st.session_state:
         st.session_state.api_key_input = ""
     if "_loaded_persistence_namespace" not in st.session_state:
@@ -2082,6 +2093,24 @@ def render_sidebar() -> Tuple[str, int]:
         st.rerun()
     if st.session_state.get("_persistence_error"):
         st.sidebar.warning(f"Saved data could not be loaded: {st.session_state['_persistence_error']}")
+
+    st.sidebar.header("Time settings")
+    selected_timezone = st.sidebar.selectbox(
+        "Display timezone",
+        options=ALL_TIMEZONE_OPTIONS,
+        index=ALL_TIMEZONE_OPTIONS.index(st.session_state.display_timezone_name) if st.session_state.display_timezone_name in ALL_TIMEZONE_OPTIONS else ALL_TIMEZONE_OPTIONS.index(DEFAULT_APP_TIMEZONE_NAME),
+        help="Choose the timezone used for displayed planner times and manual scheduling inputs when TCT override is off.",
+    )
+    st.session_state.display_timezone_name = selected_timezone
+    st.session_state.use_tct_times = st.sidebar.checkbox(
+        "Use TCT for displayed times",
+        value=bool(st.session_state.use_tct_times),
+        help="When enabled, displayed planner times switch to Torn City Time (TCT / UTC).",
+    )
+    if st.session_state.use_tct_times:
+        st.sidebar.caption(f"Displayed times are using {TORN_TIMEZONE_LABEL}. Selected local timezone remains saved as {selected_timezone}.")
+    else:
+        st.sidebar.caption(f"Displayed times are using {get_app_timezone_label()}.")
 
     st.sidebar.header("Planner assumptions")
     st.sidebar.caption("These match the locked v2 rules.")
@@ -2299,7 +2328,7 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
 
     skip_war_days = st.checkbox("Skip war days", value=goal.skip_war_days)
     refill_reset_local = next_tst_midnight_local()
-    st.caption(f"App times are shown in Central Time. Torn resets use {TORN_TIMEZONE_LABEL}. {ct_vs_tst_text()}. Next TST midnight / refill reset in CT: {fmt_local(refill_reset_local)} ({fmt_tst(refill_reset_local)}).")
+    st.caption(f"App times are shown in {get_app_timezone_label()}. Torn resets use {TORN_TIMEZONE_LABEL}. {app_vs_tst_text()}. Next TST midnight / refill reset in your selected timezone: {fmt_local(refill_reset_local)} ({fmt_tst(refill_reset_local)}).")
 
     c7, c8, c9 = st.columns(3)
     with c7:
@@ -2623,7 +2652,7 @@ def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: 
         st.caption(f"Last sync: {fmt_local(state.last_sync)}")
 
     next_reset_local = next_tst_midnight_local()
-    st.caption(f"Times shown in Central Time. {ct_vs_tst_text()}. Next TST midnight / daily refill reset: {fmt_local(next_reset_local)} ({fmt_tst(next_reset_local)}).")
+    st.caption(f"Times shown in {get_app_timezone_label()}. {app_vs_tst_text()}. Next TST midnight / daily refill reset: {fmt_local(next_reset_local)} ({fmt_tst(next_reset_local)}).")
 
     if combined_mods.detected_sources:
         st.caption("Training modifiers in effect: " + "; ".join(combined_mods.detected_sources))
@@ -2801,7 +2830,7 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
             actions.append(JumpStep(refill_dt, "Use daily refill", "Use your daily refill after your current energy block if you are training today."))
             actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
         else:
-            actions.append(JumpStep(refill_dt, "Daily refill resets (TST midnight)", f"Your daily refill resets at Torn midnight. That is {fmt_local(refill_dt)} in Central Time / {fmt_tst(refill_dt)} in Torn Standard Time."))
+            actions.append(JumpStep(refill_dt, "Daily refill resets (TST midnight)", f"Your daily refill resets at Torn midnight. That is {fmt_local(refill_dt)} in your selected timezone / {fmt_tst(refill_dt)} in Torn Standard Time."))
             if refill_dt.date() == now_dt.date():
                 actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Use daily refill after reset", "Use your daily refill once the TST reset hits if you are still training today."))
                 actions.append(JumpStep(refill_dt + timedelta(minutes=2), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
@@ -2922,7 +2951,7 @@ def build_action_plan_for_date(state: PlayerState, ratio: RatioProfile, goal: Go
             actions.append(JumpStep(day_start, "Spend opening energy", f"Use your opening energy toward {instruction.target_stat.title()} at {gym.name}."))
         if state.recovery.daily_refill_enabled:
             refill_at = datetime.combine(plan_day, dtime(hour=0, minute=1), tzinfo=TORN_TIMEZONE).astimezone(APP_TIMEZONE)
-            actions.append(JumpStep(refill_at, "TST refill reset", f"Daily refill resets at {fmt_tst(refill_at)} / {fmt_local(refill_at)}."))
+            actions.append(JumpStep(refill_at, "TST refill reset", f"Daily refill resets at {fmt_tst(refill_at)} / {fmt_local(refill_at)} in your selected timezone."))
             actions.append(JumpStep(refill_at + timedelta(minutes=1), "Use daily refill", f"Use the daily refill and train that energy into {instruction.target_stat.title()} at {gym.name}."))
         # Three baseline xanax windows.
         xanax_times = [
@@ -3396,7 +3425,7 @@ def render_torn_hero() -> None:
         </div>
         <div class="torn-hero">
             <div class="torn-hero-title">Stat Tracker Command Console</div>
-            <div class="torn-hero-sub">Torn-inspired planning console for training, jumps, unlocks, support energy, and day-by-day execution. Times shown in {APP_TIMEZONE_LABEL} and aligned against Torn reset logic.</div>
+            <div class="torn-hero-sub">Torn-inspired planning console for training, jumps, unlocks, support energy, and day-by-day execution. Times shown in {get_app_timezone_label()} and aligned against Torn reset logic.</div>
             <div class="torn-chip-row">
                 <span class="torn-chip">Battle Stats</span>
                 <span class="torn-chip">Happy Jumps</span>
@@ -3429,15 +3458,15 @@ def _calendar_day_html(item: DailyInstruction, today: date) -> str:
 
 def render_calendar_tab(plan: List[DailyInstruction], state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     st.subheader("Training calendar")
-    st.caption("Open a day to expand its timed action plan directly inside the calendar.")
+    st.caption("Day details stay hidden until you click Open day.")
     if not plan:
         st.info("No calendar data available yet.")
         return
 
     today = local_today()
     plan_map = {item.plan_date: item for item in plan}
-    if st.session_state.selected_calendar_date is None and plan:
-        st.session_state.selected_calendar_date = (today if today in plan_map else plan[0].plan_date).isoformat()
+    # Keep all day details hidden until the user explicitly opens a day.
+    # Do not auto-expand today or the first day on initial load.
 
     first_day = plan[0].plan_date
     last_day = plan[-1].plan_date
