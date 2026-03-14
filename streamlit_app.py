@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import json
 import math
 import re
+import hashlib
 
 import requests
 import streamlit as st
@@ -51,6 +52,13 @@ APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
 TORN_TIMEZONE = ZoneInfo("UTC")
 TORN_TIMEZONE_LABEL = "TST (UTC)"
 PERSISTENCE_PATH = Path(".streamlit/torn_planner_persistence.json")
+
+
+def _api_namespace(api_key: str) -> Optional[str]:
+    key = (api_key or "").strip()
+    if not key:
+        return None
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
 
 
 def _jsonify(value: Any) -> Any:
@@ -100,8 +108,8 @@ def _player_state_from_dict(data: Dict[str, Any]) -> PlayerState:
     )
 
 
-def save_persistent_state() -> None:
-    payload = {
+def _current_persistence_payload() -> Dict[str, Any]:
+    return {
         "goal_settings": st.session_state.get("goal_settings"),
         "ratio_profile": st.session_state.get("ratio_profile"),
         "manual_mods": st.session_state.get("manual_mods"),
@@ -112,38 +120,108 @@ def save_persistent_state() -> None:
         "player_state": st.session_state.get("player_state"),
         "preview_days": st.session_state.get("preview_days", 30),
     }
-    PERSISTENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PERSISTENCE_PATH.write_text(json.dumps(_jsonify(payload), indent=2), encoding="utf-8")
 
 
-def load_persistent_state() -> None:
-    if st.session_state.get("_persistent_state_loaded"):
-        return
-    st.session_state._persistent_state_loaded = True
+def _read_persistence_store() -> Dict[str, Any]:
     if not PERSISTENCE_PATH.exists():
-        return
+        return {"profiles": {}}
     try:
         payload = _dejsonify(json.loads(PERSISTENCE_PATH.read_text(encoding="utf-8")))
-        if isinstance(payload.get("goal_settings"), dict):
-            st.session_state.goal_settings = GoalSettings(**payload["goal_settings"])
-        if isinstance(payload.get("ratio_profile"), dict):
-            st.session_state.ratio_profile = RatioProfile(**payload["ratio_profile"])
-        if isinstance(payload.get("manual_mods"), dict):
-            st.session_state.manual_mods = TrainingModifiers(**payload["manual_mods"])
-        if isinstance(payload.get("player_state"), dict):
-            st.session_state.player_state = _player_state_from_dict(payload["player_state"])
-        st.session_state.manual_unlocked_gyms = list(payload.get("manual_unlocked_gyms", st.session_state.get("manual_unlocked_gyms", [])))
-        st.session_state.gym_multiselect = list(payload.get("gym_multiselect", st.session_state.get("gym_multiselect", [])))
-        st.session_state.highest_unlocked_gym_selector = payload.get("highest_unlocked_gym_selector", st.session_state.get("highest_unlocked_gym_selector", "-- none --"))
-        st.session_state.manual_99k_jump_entries = list(payload.get("manual_99k_jump_entries", st.session_state.get("manual_99k_jump_entries", [])))
-        st.session_state.preview_days = int(payload.get("preview_days", st.session_state.get("preview_days", 30)))
+        if isinstance(payload, dict) and isinstance(payload.get("profiles"), dict):
+            return payload
+    except Exception:
+        pass
+    return {"profiles": {}}
+
+
+def _write_persistence_store(store: Dict[str, Any]) -> None:
+    PERSISTENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PERSISTENCE_PATH.write_text(json.dumps(_jsonify(store), indent=2), encoding="utf-8")
+
+
+def reset_runtime_state(keep_api_fields: bool = True) -> None:
+    api_input = st.session_state.get("api_key_input", "") if keep_api_fields else ""
+    loaded_namespace = st.session_state.get("_loaded_persistence_namespace") if keep_api_fields else None
+    st.session_state.player_state = None
+    st.session_state.goal_settings = GoalSettings()
+    st.session_state.ratio_profile = RatioProfile()
+    st.session_state.manual_mods = TrainingModifiers()
+    st.session_state.manual_unlocked_gyms = []
+    st.session_state.gym_multiselect = []
+    st.session_state.selected_calendar_date = None
+    st.session_state.highest_unlocked_gym_selector = "-- none --"
+    st.session_state.manual_99k_jump_date = local_today() + timedelta(days=7)
+    st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
+    st.session_state.preview_days = 30
+    st.session_state._persistence_error = None
+    if keep_api_fields:
+        st.session_state.api_key_input = api_input
+        st.session_state._loaded_persistence_namespace = loaded_namespace
+
+
+def _apply_persistent_payload(payload: Dict[str, Any]) -> None:
+    if isinstance(payload.get("goal_settings"), dict):
+        st.session_state.goal_settings = GoalSettings(**payload["goal_settings"])
+    if isinstance(payload.get("ratio_profile"), dict):
+        st.session_state.ratio_profile = RatioProfile(**payload["ratio_profile"])
+    if isinstance(payload.get("manual_mods"), dict):
+        st.session_state.manual_mods = TrainingModifiers(**payload["manual_mods"])
+    if isinstance(payload.get("player_state"), dict):
+        st.session_state.player_state = _player_state_from_dict(payload["player_state"])
+    st.session_state.manual_unlocked_gyms = list(payload.get("manual_unlocked_gyms", []))
+    st.session_state.gym_multiselect = list(payload.get("gym_multiselect", []))
+    st.session_state.highest_unlocked_gym_selector = payload.get("highest_unlocked_gym_selector", "-- none --")
+    st.session_state.manual_99k_jump_entries = list(payload.get("manual_99k_jump_entries", st.session_state.get("manual_99k_jump_entries", [])))
+    st.session_state.preview_days = int(payload.get("preview_days", 30))
+
+
+def load_persistent_state_for_api(api_key: str) -> None:
+    namespace = _api_namespace(api_key)
+    current_namespace = st.session_state.get("_loaded_persistence_namespace")
+    if namespace == current_namespace:
+        return
+
+    reset_runtime_state(keep_api_fields=True)
+    st.session_state._loaded_persistence_namespace = namespace
+
+    if not namespace:
+        return
+
+    try:
+        store = _read_persistence_store()
+        payload = store.get("profiles", {}).get(namespace)
+        if isinstance(payload, dict):
+            _apply_persistent_payload(payload)
     except Exception as exc:
         st.session_state._persistence_error = str(exc)
 
 
-def clear_persistent_state() -> None:
-    if PERSISTENCE_PATH.exists():
-        PERSISTENCE_PATH.unlink()
+def save_persistent_state(api_key: str = "") -> None:
+    namespace = _api_namespace(api_key)
+    if not namespace:
+        return
+    store = _read_persistence_store()
+    profiles = store.setdefault("profiles", {})
+    payload = _current_persistence_payload()
+    metadata = {
+        "torn_name": getattr(st.session_state.get("player_state"), "torn_name", "") if st.session_state.get("player_state") else "",
+        "torn_id": getattr(st.session_state.get("player_state"), "torn_id", None) if st.session_state.get("player_state") else None,
+        "saved_at": local_now(),
+    }
+    payload["_meta"] = metadata
+    profiles[namespace] = payload
+    _write_persistence_store(store)
+
+
+def clear_persistent_state(api_key: str = "") -> None:
+    namespace = _api_namespace(api_key)
+    if not namespace or not PERSISTENCE_PATH.exists():
+        return
+    store = _read_persistence_store()
+    profiles = store.get("profiles", {})
+    if namespace in profiles:
+        del profiles[namespace]
+    _write_persistence_store(store)
 
 
 def local_now() -> datetime:
@@ -1968,28 +2046,41 @@ def init_state() -> None:
         st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
     if "preview_days" not in st.session_state:
         st.session_state.preview_days = 30
-    load_persistent_state()
+    if "api_key_input" not in st.session_state:
+        st.session_state.api_key_input = ""
+    if "_loaded_persistence_namespace" not in st.session_state:
+        st.session_state._loaded_persistence_namespace = None
+    if "_persistence_error" not in st.session_state:
+        st.session_state._persistence_error = None
 
 
 def render_sidebar() -> Tuple[str, int]:
     st.sidebar.header("Connection")
-    api_key = st.sidebar.text_input("Torn API key", type="password")
+    api_key = st.sidebar.text_input(
+        "Torn API key",
+        type="password",
+        key="api_key_input",
+        help="This API key is also used as your private planner profile key. The app stores only a one-way hash of it, not the key itself.",
+    )
+    load_persistent_state_for_api(api_key)
+
     preview_days = st.sidebar.slider("Preview days", min_value=7, max_value=90, value=int(st.session_state.preview_days), step=1)
     st.session_state.preview_days = preview_days
 
     st.sidebar.header("Saved planner data")
-    st.sidebar.caption("Planner inputs auto-save on this app. Your API key is not saved.")
+    if api_key:
+        st.sidebar.caption("This planner auto-saves to a private profile keyed by your API. The raw API key is not written to disk.")
+    else:
+        st.sidebar.caption("Enter your API key to load and save your private planner profile.")
+    loaded_namespace = st.session_state.get("_loaded_persistence_namespace")
+    if api_key and loaded_namespace:
+        st.sidebar.caption(f"Profile loaded: {loaded_namespace[:8]}…")
     if st.session_state.get("player_state") and st.session_state.player_state.last_sync:
         st.sidebar.caption(f"Last saved snapshot: {fmt_local(st.session_state.player_state.last_sync)}")
-    if st.sidebar.button("Clear saved planner data", use_container_width=True):
-        clear_persistent_state()
-        for key in [
-            "player_state", "goal_settings", "ratio_profile", "manual_mods", "manual_unlocked_gyms",
-            "gym_multiselect", "highest_unlocked_gym_selector", "manual_99k_jump_entries", "preview_days",
-            "_persistent_state_loaded", "_persistence_error",
-        ]:
-            if key in st.session_state:
-                del st.session_state[key]
+    if st.sidebar.button("Clear saved planner data", use_container_width=True, disabled=not bool(api_key)):
+        clear_persistent_state(api_key)
+        reset_runtime_state(keep_api_fields=True)
+        st.session_state._loaded_persistence_namespace = _api_namespace(api_key)
         st.rerun()
     if st.session_state.get("_persistence_error"):
         st.sidebar.warning(f"Saved data could not be loaded: {st.session_state['_persistence_error']}")
@@ -3461,7 +3552,7 @@ def main() -> None:
             st.success("Demo profile loaded.")
 
     if st.session_state.player_state is None:
-        save_persistent_state()
+        save_persistent_state(api_key)
         st.info("Load demo data or sync with your API key to begin.")
         return
 
@@ -3506,7 +3597,7 @@ def main() -> None:
         with st.expander("Plan preview table"):
             render_plan_table(plan)
 
-    save_persistent_state()
+    save_persistent_state(api_key)
 
 
 if __name__ == "__main__":
