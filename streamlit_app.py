@@ -1381,6 +1381,11 @@ def parse_manual_99k_schedule_text(schedule_text: str) -> List[datetime]:
     return sorted(entries)
 
 
+def serialize_manual_99k_schedule(datetimes: List[datetime]) -> str:
+    normalized = sorted({to_local(dt).replace(second=0, microsecond=0) for dt in datetimes})
+    return "\n".join(dt.strftime("%Y-%m-%d %H:%M") for dt in normalized)
+
+
 def manual_99k_schedule_datetimes(goal: GoalSettings) -> List[datetime]:
     parsed = parse_manual_99k_schedule_text(goal.manual_99k_jump_schedule_text)
     if parsed:
@@ -1708,6 +1713,8 @@ def init_state() -> None:
         st.session_state.highest_unlocked_gym_selector = "-- none --"
     if "manual_99k_jump_date" not in st.session_state:
         st.session_state.manual_99k_jump_date = local_today() + timedelta(days=7)
+    if "manual_99k_jump_entries" not in st.session_state:
+        st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -1830,26 +1837,56 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     scheduled_99k_jump_time = goal.scheduled_99k_jump_time
     manual_99k_jump_schedule_text = goal.manual_99k_jump_schedule_text
     if schedule_99k_jump:
-        c16, c17 = st.columns(2)
+        saved_entries = manual_99k_schedule_datetimes(goal)
+        if saved_entries and not st.session_state.manual_99k_jump_entries:
+            st.session_state.manual_99k_jump_entries = saved_entries
+        elif not st.session_state.manual_99k_jump_entries:
+            st.session_state.manual_99k_jump_entries = [datetime.combine(goal.scheduled_99k_jump_date, goal.scheduled_99k_jump_time).replace(tzinfo=APP_TIMEZONE)]
+
+        st.markdown("**Manual 99k jump schedule (Central Time)**")
+        st.caption("Add exact 99k jumps with the controls below. The app sorts them automatically and prevents duplicates.")
+
+        c16, c17, c18, c19 = st.columns([1.2, 1, 0.8, 0.7])
         with c16:
-            scheduled_99k_jump_date = st.date_input("Default 99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
+            scheduled_99k_jump_date = st.date_input("99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
         with c17:
-            scheduled_99k_jump_time = st.time_input("Default 99k jump time", value=goal.scheduled_99k_jump_time, step=timedelta(minutes=15))
-        fallback_line = f"{scheduled_99k_jump_date.isoformat()} {scheduled_99k_jump_time.strftime('%H:%M')}"
-        initial_text = goal.manual_99k_jump_schedule_text.strip() or fallback_line
-        manual_99k_jump_schedule_text = st.text_area(
-            "Manual 99k jump schedule (Central Time, one per line: YYYY-MM-DD HH:MM)",
-            value=initial_text,
-            height=120,
-            help="Schedule multiple exact 99k jumps here. Example:\n2026-03-20 00:15\n2026-04-05 00:15",
-        )
-        parsed_schedule = parse_manual_99k_schedule_text(manual_99k_jump_schedule_text)
-        if parsed_schedule:
-            st.caption(f"Scheduled 99k jumps loaded: {len(parsed_schedule)}")
+            scheduled_99k_jump_time = st.time_input("99k jump time", value=goal.scheduled_99k_jump_time, step=timedelta(minutes=15), key="manual_99k_jump_time")
+        with c18:
+            add_jump = st.button("Add jump", use_container_width=True)
+        with c19:
+            clear_jumps = st.button("Clear all", use_container_width=True)
+
+        if add_jump:
+            new_dt = datetime.combine(scheduled_99k_jump_date, scheduled_99k_jump_time).replace(tzinfo=APP_TIMEZONE, second=0, microsecond=0)
+            existing = {to_local(dt).replace(second=0, microsecond=0).isoformat() for dt in st.session_state.manual_99k_jump_entries}
+            if new_dt.isoformat() not in existing:
+                st.session_state.manual_99k_jump_entries = sorted(st.session_state.manual_99k_jump_entries + [new_dt], key=lambda d: to_local(d))
+        if clear_jumps:
+            st.session_state.manual_99k_jump_entries = []
+
+        entries = sorted(st.session_state.manual_99k_jump_entries, key=lambda d: to_local(d))
+        if entries:
+            remove_options = [to_local(dt).strftime("%Y-%m-%d %H:%M") for dt in entries]
+            r1, r2 = st.columns([3, 1])
+            with r1:
+                remove_choice = st.selectbox("Scheduled 99k jumps", options=remove_options, index=0, help="Pick an existing scheduled jump if you want to remove it.")
+            with r2:
+                remove_jump = st.button("Remove selected", use_container_width=True)
+            if remove_jump:
+                st.session_state.manual_99k_jump_entries = [dt for dt in entries if to_local(dt).strftime("%Y-%m-%d %H:%M") != remove_choice]
+                entries = sorted(st.session_state.manual_99k_jump_entries, key=lambda d: to_local(d))
+
+            schedule_rows = [{"Date": to_local(dt).strftime("%Y-%m-%d"), "Time": to_local(dt).strftime("%H:%M"), "Weekday": to_local(dt).strftime("%a")} for dt in entries]
+            st.dataframe(schedule_rows, use_container_width=True, hide_index=True)
+            manual_99k_jump_schedule_text = serialize_manual_99k_schedule(entries)
+            st.caption(f"Scheduled 99k jumps loaded: {len(entries)}")
         else:
-            st.caption("No valid manual 99k jumps parsed yet. The fallback single date/time above will be used if you leave the box blank.")
+            fallback_dt = datetime.combine(scheduled_99k_jump_date, scheduled_99k_jump_time).replace(tzinfo=APP_TIMEZONE, second=0, microsecond=0)
+            manual_99k_jump_schedule_text = serialize_manual_99k_schedule([fallback_dt])
+            st.info("No manual 99k jumps added yet. Use the controls above to add one or more exact jump times.")
     else:
         manual_99k_jump_schedule_text = ""
+        st.session_state.manual_99k_jump_entries = []
 
     current_gym_energy_progress = st.number_input(
         "Current estimated gym energy progress toward next unlock",
