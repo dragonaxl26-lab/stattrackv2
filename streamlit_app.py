@@ -1381,7 +1381,7 @@ def simulate_day_with_unlocks(
     used_gyms: List[str] = []
     unlock_notes: List[str] = []
     unlock_time: Optional[datetime] = None
-    time_cursor = datetime.combine(plan_day, dtime(hour=8, minute=0))
+    time_cursor = datetime.combine(plan_day, dtime(hour=8, minute=0), tzinfo=APP_TIMEZONE)
     if jump_plan is not None and plan_day == jump_plan.execute_at.date():
         time_cursor = jump_plan.execute_at
 
@@ -2117,10 +2117,11 @@ def render_frontline_progress(state: PlayerState, ratio: RatioProfile, goal: Goa
     else:
         st.caption(f"{projection.gym_name} requirement is currently met.")
     if projection.estimated_unlock_at is not None:
-        if projection.estimated_unlock_at <= local_now() + timedelta(minutes=1):
+        unlock_at = to_local(projection.estimated_unlock_at)
+        if unlock_at <= local_now() + timedelta(minutes=1):
             st.success(f"{projection.gym_name} is available now in the planner.")
         else:
-            st.success(f"Projected {projection.gym_name} unlock: {fmt_local(projection.estimated_unlock_at)}")
+            st.success(f"Projected {projection.gym_name} unlock: {fmt_local(unlock_at)}")
     else:
         st.info(f"Projected {projection.gym_name} unlock is beyond the current forecast window.")
 
