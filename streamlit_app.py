@@ -1508,6 +1508,13 @@ def choose_target_stat(stats: PlayerStats, ratio: RatioProfile) -> str:
 
 
 
+
+
+def choose_99k_target_stat(stats: PlayerStats) -> str:
+    """For 99k jumps, prioritize the highest current stat for max raw stat gain."""
+    stat_map = stats.as_dict()
+    return max(stat_map, key=stat_map.get)
+
 def get_unlocked_gyms(state: PlayerState) -> List[Gym]:
     active_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_unlocked_gym_index(state))
     return [GYM_INDEX[name] for name in active_names if name in GYM_INDEX]
@@ -1654,7 +1661,7 @@ def build_specific_jump_plan(
     execute_at: datetime,
     manual_selected: bool = False,
 ) -> Optional[JumpPlan]:
-    target_stat = choose_target_stat(state.stats, ratio)
+    target_stat = choose_99k_target_stat(state.stats) if jump_type == "super_happy_jump" else choose_target_stat(state.stats, ratio)
     gym = best_gym_for_stat(state, target_stat)
     if gym is None:
         return None
