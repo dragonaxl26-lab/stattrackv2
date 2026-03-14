@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, time as dtime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import math
 import re
@@ -43,6 +44,24 @@ DEFAULT_EXPECTED_HAPPY_LOSS_RATIO = 0.50
 TORN_V2_BASE_URL = "https://api.torn.com/v2"
 TORN_API_TIMEOUT_SECONDS = 20
 TORN_API_COMMENT = "torn-stat-tracker-v2"
+APP_TIMEZONE = ZoneInfo("America/Chicago")
+APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
+
+
+def local_now() -> datetime:
+    return datetime.now(APP_TIMEZONE)
+
+
+def local_today() -> date:
+    return local_now().date()
+
+
+def fmt_local(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=APP_TIMEZONE)
+    else:
+        dt = dt.astimezone(APP_TIMEZONE)
+    return dt.strftime("%Y-%m-%d %H:%M %Z")
 
 
 @dataclass
@@ -182,12 +201,12 @@ class PlayerState:
 @dataclass
 class GoalSettings:
     target_total_stats: float = 250_000_000
-    target_date: date = field(default_factory=lambda: date.today() + timedelta(days=210))
+    target_date: date = field(default_factory=lambda: local_today() + timedelta(days=210))
     fhc_allowed: bool = True
     cans_allowed: bool = True
     auto_schedule_happy_jumps: bool = True
     schedule_99k_jump: bool = False
-    scheduled_99k_jump_date: date = field(default_factory=lambda: date.today() + timedelta(days=7))
+    scheduled_99k_jump_date: date = field(default_factory=lambda: local_today() + timedelta(days=7))
     scheduled_99k_jump_time: dtime = dtime(hour=0, minute=15)
     current_gym_energy_progress: int = 0
     skip_war_days: bool = True
@@ -476,7 +495,7 @@ def _extract_war_days(*payloads: Dict[str, Any]) -> List[date]:
     found: set[date] = set()
     start_keys = ["start", "started", "start_timestamp", "war_start", "begin"]
     end_keys = ["end", "ended", "end_timestamp", "war_end", "finish"]
-    today_utc = datetime.utcnow().date()
+    today_utc = local_today()
     future_limit = today_utc + timedelta(days=60)
     for payload in payloads:
         for obj in _walk_objects(payload):
@@ -675,14 +694,14 @@ def build_demo_player_state() -> PlayerState:
             "Racing Fitness", "Complete Cardio", "Legs, Bums and Tums", "Deep Burn", "Apollo Gym",
             "Gun Shop", "Force Training", "Cha Cha's", "Atlas", "Last Round", "The Edge",
         ],
-        faction_war_days=[date.today() + timedelta(days=2)],
+        faction_war_days=[local_today() + timedelta(days=2)],
         training_modifiers=TrainingModifiers(
             all_gym_gains_pct=3.0,
             happy_loss_reduction_pct=50.0,
             detected_sources=["Demo Fitness Center (+3% gym gains, -50% gym happy loss)"],
         ),
         api_notes=["Demo data loaded.", "Unlocked gyms are demo values."],
-        last_sync=datetime.now(),
+        last_sync=local_now(),
     )
 
 
@@ -779,7 +798,7 @@ def fetch_player_state_from_api(api_key: str, manual_unlocked_gyms: Optional[Lis
         faction_war_days=faction_war_days,
         training_modifiers=training_modifiers,
         api_notes=api_notes,
-        last_sync=datetime.now(),
+        last_sync=local_now(),
     )
 
 
@@ -838,7 +857,7 @@ def natural_energy_between(state: PlayerState, mods: TrainingModifiers, start_dt
 
 
 def build_today_energy_blocks(state: PlayerState, goal: GoalSettings, mods: TrainingModifiers, now_dt: Optional[datetime] = None) -> List[Tuple[datetime, int, str]]:
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or local_now()
     blocks: List[Tuple[datetime, int, str]] = []
 
     if state.recovery.current_energy > 0:
@@ -861,7 +880,7 @@ def build_today_energy_blocks(state: PlayerState, goal: GoalSettings, mods: Trai
 
 
 def estimate_today_unlock_from_blocks(state: PlayerState, goal: GoalSettings, mods: TrainingModifiers, now_dt: Optional[datetime] = None) -> Optional[Tuple[datetime, str]]:
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or local_now()
     highest_idx = highest_unlocked_gym_index(state)
     next_gym = next_gym_name_for_index(highest_idx)
     threshold = next_gym_threshold_for_index(highest_idx)
@@ -1114,7 +1133,7 @@ def projected_start_happy_for_day(state: PlayerState, goal: GoalSettings, plan_d
         return goal.happy_jump_start_happy
     if day_type == "super_happy_jump":
         return goal.super_happy_jump_start_happy
-    if plan_day == date.today() and state.recovery.current_happy > 0:
+    if plan_day == local_today() and state.recovery.current_happy > 0:
         return state.recovery.current_happy
     if state.recovery.max_happy > 0:
         return state.recovery.max_happy
@@ -1128,7 +1147,7 @@ def selected_99k_execute_at(goal: GoalSettings) -> Optional[datetime]:
 
 
 def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> datetime:
-    now_dt = datetime.now()
+    now_dt = local_now()
     prep_ready = now_dt + timedelta(minutes=max(state.recovery.drug_cd_minutes, state.recovery.booster_cd_minutes))
     candidate = next_quarter_hour(prep_ready + timedelta(hours=goal.jump_prep_hours))
     while (not goal.allow_jump_on_war_days) and (candidate.date() in state.faction_war_days):
@@ -1138,7 +1157,7 @@ def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> dat
 
 def planned_xanax_stack_times(state: PlayerState, goal: GoalSettings, execute_at: datetime) -> List[datetime]:
     first_candidate = execute_at - timedelta(hours=goal.jump_prep_hours)
-    earliest_allowed = datetime.now() + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
+    earliest_allowed = local_now() + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
     first = max(first_candidate, earliest_allowed)
     times = [first]
     for _ in range(1, int(goal.jump_stack_xanax_uses)):
@@ -1185,7 +1204,7 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
     final_cd_clear = xanax_times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
     if final_cd_clear > execute_at:
         notes.append("Warning: current drug cooldown and stack timing push the final Xanax cooldown past the planned jump window.")
-    if state.recovery.booster_cd_minutes > 0 and datetime.now() + timedelta(minutes=state.recovery.booster_cd_minutes) > execute_at:
+    if state.recovery.booster_cd_minutes > 0 and local_now() + timedelta(minutes=state.recovery.booster_cd_minutes) > execute_at:
         notes.append("Warning: booster cooldown is still active beyond the planned jump window.")
     if execute_at.date() in state.faction_war_days and not goal.allow_jump_on_war_days:
         notes.append("Warning: this planned jump falls on a war day.")
@@ -1214,8 +1233,8 @@ def build_jump_sequence(state: PlayerState, goal: GoalSettings, jump_plan: JumpP
     steps: List[JumpStep] = []
     xanax_times = planned_xanax_stack_times(state, goal, jump_plan.execute_at)
 
-    if state.recovery.current_energy > 0 and datetime.now().date() <= jump_plan.execute_at.date():
-        steps.append(JumpStep(datetime.now(), "Spend current energy", f"Use your current {state.recovery.current_energy} energy now unless you are already in the final save-for-jump window."))
+    if state.recovery.current_energy > 0 and local_today() <= jump_plan.execute_at.date():
+        steps.append(JumpStep(local_now(), "Spend current energy", f"Use your current {state.recovery.current_energy} energy now unless you are already in the final save-for-jump window."))
 
     for idx, use_time in enumerate(xanax_times, start=1):
         steps.append(JumpStep(use_time, f"Take Xanax #{idx}", "Take the dose as soon as drug cooldown clears, then let the next cooldown run."))
@@ -1267,8 +1286,8 @@ def energy_budget_for_day(state: PlayerState, goal: GoalSettings, plan_day: date
     # For today, use only energy that is actually reachable from the current
     # moment forward. This prevents the preview from assuming all 3 Xanax are
     # available before their cooldowns clear.
-    if plan_day == date.today() and day_type not in {"happy_jump", "super_happy_jump"}:
-        blocks = build_today_energy_blocks(state, goal, mods, datetime.now())
+    if plan_day == local_today() and day_type not in {"happy_jump", "super_happy_jump"}:
+        blocks = build_today_energy_blocks(state, goal, mods, local_now())
         if day_type == "prep":
             # Prep day should remain conservative: only current energy plus any
             # natural regen/refill that is reachable today, but no extra jump stack.
@@ -1305,7 +1324,7 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
         f"Effective gym gain multiplier for {target_stat}: {combined_mods.gym_multiplier_for_stat(target_stat):.3f}x.",
     ]
     if jump_plan is not None:
-        notes.append(f"Next jump window: {jump_plan.execute_at.strftime('%Y-%m-%d %H:%M')}.")
+        notes.append(f"Next jump window: {fmt_local(jump_plan.execute_at)}.")
     if day_type == "prep":
         notes.append("Prep day: do not assume more drug uses are possible until cooldown and stack timing allow them.")
     elif day_type == "happy_jump":
@@ -1327,7 +1346,7 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
     progress_e = max(0, int(goal.current_gym_energy_progress))
 
     for offset in range(days):
-        plan_day = date.today() + timedelta(days=offset)
+        plan_day = local_today() + timedelta(days=offset)
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
@@ -1389,7 +1408,7 @@ def init_state() -> None:
     if "highest_unlocked_gym_selector" not in st.session_state:
         st.session_state.highest_unlocked_gym_selector = "-- none --"
     if "manual_99k_jump_date" not in st.session_state:
-        st.session_state.manual_99k_jump_date = date.today() + timedelta(days=7)
+        st.session_state.manual_99k_jump_date = local_today() + timedelta(days=7)
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -1422,7 +1441,7 @@ def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: Goal
     projected_highest_idx = highest_idx
     projected_progress = progress_e
     for offset in range(days):
-        plan_day = date.today() + timedelta(days=offset)
+        plan_day = local_today() + timedelta(days=offset)
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
@@ -1632,7 +1651,7 @@ def render_next_gym_progress(state: PlayerState, ratio: RatioProfile, goal: Goal
     st.progress(min(1.0, projection.current_progress / max(projection.required_progress, 1)))
     st.caption(f"Remaining energy to unlock: {projection.remaining_energy:,} E")
     if projection.estimated_unlock_at is not None:
-        st.success(f"Projected unlock: {projection.estimated_unlock_at.strftime('%Y-%m-%d %H:%M')}")
+        st.success(f"Projected unlock: {fmt_local(projection.estimated_unlock_at)}")
     else:
         st.info("Projected unlock is beyond the current preview window.")
 
@@ -1671,7 +1690,7 @@ def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: 
     )
 
     if state.last_sync is not None:
-        st.caption(f"Last sync: {state.last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+        st.caption(f"Last sync: {fmt_local(state.last_sync)}")
 
     if combined_mods.detected_sources:
         st.caption("Training modifiers in effect: " + "; ".join(combined_mods.detected_sources))
@@ -1756,8 +1775,8 @@ def render_jump_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSetting
     st.write(f"**Recommended jump:** {jump_plan.jump_type.replace('_', ' ').title()}")
     st.write(f"**Target stat:** {jump_plan.target_stat.title()}")
     st.write(f"**Gym:** {jump_plan.gym_name}")
-    st.write(f"**Prep starts:** {jump_plan.prep_start.strftime('%Y-%m-%d %H:%M')}")
-    st.write(f"**Execute at:** {jump_plan.execute_at.strftime('%Y-%m-%d %H:%M')}")
+    st.write(f"**Prep starts:** {fmt_local(jump_plan.prep_start)}")
+    st.write(f"**Execute at:** {fmt_local(jump_plan.execute_at)}")
     st.write(f"**Projected normal gain:** {jump_plan.projected_normal_gain:,.2f}")
     st.write(f"**Projected jump gain:** {jump_plan.projected_jump_gain:,.2f}")
     st.write(f"**Projected extra gain:** {jump_plan.projected_gain_delta:,.2f}")
@@ -1771,7 +1790,7 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
     today_type, jump_plan = day_type_for_date(state, ratio, goal, date.today(), combined_mods)
     target_stat = choose_target_stat(state.stats, ratio)
     gym = best_gym_for_stat(state, target_stat)
-    now_dt = datetime.now()
+    now_dt = local_now()
     actions: List[JumpStep] = []
 
     if gym is None:
@@ -1867,7 +1886,7 @@ def render_plan_table(plan: List[DailyInstruction]) -> None:
 def render_forecast(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     st.subheader("Forecast")
     est_days = days_until_goal_estimate(state, goal, manual_mods)
-    target_days = (goal.target_date - date.today()).days
+    target_days = (goal.target_date - local_today()).days
     if est_days is None:
         st.error("Forecast unavailable until a valid gym path and gain model are set.")
         return
