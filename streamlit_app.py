@@ -1,11 +1,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict, is_dataclass
 from datetime import date, datetime, timedelta, time as dtime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import json
 import math
 import re
 
@@ -48,6 +50,100 @@ APP_TIMEZONE = ZoneInfo("America/Chicago")
 APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
 TORN_TIMEZONE = ZoneInfo("UTC")
 TORN_TIMEZONE_LABEL = "TST (UTC)"
+PERSISTENCE_PATH = Path(".streamlit/torn_planner_persistence.json")
+
+
+def _jsonify(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return {"__kind__": "datetime", "value": value.isoformat()}
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return {"__kind__": "date", "value": value.isoformat()}
+    if isinstance(value, dtime):
+        return {"__kind__": "time", "value": value.isoformat()}
+    if is_dataclass(value):
+        return _jsonify(asdict(value))
+    if isinstance(value, dict):
+        return {k: _jsonify(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonify(v) for v in value]
+    return value
+
+
+def _dejsonify(value: Any) -> Any:
+    if isinstance(value, dict):
+        kind = value.get("__kind__")
+        if kind == "datetime":
+            return datetime.fromisoformat(value["value"])
+        if kind == "date":
+            return date.fromisoformat(value["value"])
+        if kind == "time":
+            return dtime.fromisoformat(value["value"])
+        return {k: _dejsonify(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_dejsonify(v) for v in value]
+    return value
+
+
+def _player_state_from_dict(data: Dict[str, Any]) -> PlayerState:
+    return PlayerState(
+        stats=PlayerStats(**data.get("stats", {})),
+        recovery=RecoveryState(**data.get("recovery", {})),
+        unlocked_gyms=list(data.get("unlocked_gyms", [])),
+        faction_war_days=list(data.get("faction_war_days", [])),
+        torn_name=data.get("torn_name", ""),
+        torn_id=data.get("torn_id"),
+        faction_id=data.get("faction_id"),
+        faction_name=data.get("faction_name", ""),
+        training_modifiers=TrainingModifiers(**data.get("training_modifiers", {})),
+        api_notes=list(data.get("api_notes", [])),
+        last_sync=data.get("last_sync"),
+    )
+
+
+def save_persistent_state() -> None:
+    payload = {
+        "goal_settings": st.session_state.get("goal_settings"),
+        "ratio_profile": st.session_state.get("ratio_profile"),
+        "manual_mods": st.session_state.get("manual_mods"),
+        "manual_unlocked_gyms": st.session_state.get("manual_unlocked_gyms", []),
+        "gym_multiselect": st.session_state.get("gym_multiselect", []),
+        "highest_unlocked_gym_selector": st.session_state.get("highest_unlocked_gym_selector", "-- none --"),
+        "manual_99k_jump_entries": st.session_state.get("manual_99k_jump_entries", []),
+        "player_state": st.session_state.get("player_state"),
+        "preview_days": st.session_state.get("preview_days", 30),
+    }
+    PERSISTENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PERSISTENCE_PATH.write_text(json.dumps(_jsonify(payload), indent=2), encoding="utf-8")
+
+
+def load_persistent_state() -> None:
+    if st.session_state.get("_persistent_state_loaded"):
+        return
+    st.session_state._persistent_state_loaded = True
+    if not PERSISTENCE_PATH.exists():
+        return
+    try:
+        payload = _dejsonify(json.loads(PERSISTENCE_PATH.read_text(encoding="utf-8")))
+        if isinstance(payload.get("goal_settings"), dict):
+            st.session_state.goal_settings = GoalSettings(**payload["goal_settings"])
+        if isinstance(payload.get("ratio_profile"), dict):
+            st.session_state.ratio_profile = RatioProfile(**payload["ratio_profile"])
+        if isinstance(payload.get("manual_mods"), dict):
+            st.session_state.manual_mods = TrainingModifiers(**payload["manual_mods"])
+        if isinstance(payload.get("player_state"), dict):
+            st.session_state.player_state = _player_state_from_dict(payload["player_state"])
+        st.session_state.manual_unlocked_gyms = list(payload.get("manual_unlocked_gyms", st.session_state.get("manual_unlocked_gyms", [])))
+        st.session_state.gym_multiselect = list(payload.get("gym_multiselect", st.session_state.get("gym_multiselect", [])))
+        st.session_state.highest_unlocked_gym_selector = payload.get("highest_unlocked_gym_selector", st.session_state.get("highest_unlocked_gym_selector", "-- none --"))
+        st.session_state.manual_99k_jump_entries = list(payload.get("manual_99k_jump_entries", st.session_state.get("manual_99k_jump_entries", [])))
+        st.session_state.preview_days = int(payload.get("preview_days", st.session_state.get("preview_days", 30)))
+    except Exception as exc:
+        st.session_state._persistence_error = str(exc)
+
+
+def clear_persistent_state() -> None:
+    if PERSISTENCE_PATH.exists():
+        PERSISTENCE_PATH.unlink()
 
 
 def local_now() -> datetime:
@@ -1705,6 +1801,8 @@ def init_state() -> None:
         st.session_state.goal_settings = GoalSettings()
     if "ratio_profile" not in st.session_state:
         st.session_state.ratio_profile = RatioProfile()
+    if "manual_mods" not in st.session_state:
+        st.session_state.manual_mods = TrainingModifiers()
     if "manual_unlocked_gyms" not in st.session_state:
         st.session_state.manual_unlocked_gyms = []
     if "gym_multiselect" not in st.session_state:
@@ -1715,12 +1813,33 @@ def init_state() -> None:
         st.session_state.manual_99k_jump_date = local_today() + timedelta(days=7)
     if "manual_99k_jump_entries" not in st.session_state:
         st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
+    if "preview_days" not in st.session_state:
+        st.session_state.preview_days = 30
+    load_persistent_state()
 
 
 def render_sidebar() -> Tuple[str, int]:
     st.sidebar.header("Connection")
     api_key = st.sidebar.text_input("Torn API key", type="password")
-    preview_days = st.sidebar.slider("Preview days", min_value=7, max_value=90, value=30, step=1)
+    preview_days = st.sidebar.slider("Preview days", min_value=7, max_value=90, value=int(st.session_state.preview_days), step=1)
+    st.session_state.preview_days = preview_days
+
+    st.sidebar.header("Saved planner data")
+    st.sidebar.caption("Planner inputs auto-save on this app. Your API key is not saved.")
+    if st.session_state.get("player_state") and st.session_state.player_state.last_sync:
+        st.sidebar.caption(f"Last saved snapshot: {fmt_local(st.session_state.player_state.last_sync)}")
+    if st.sidebar.button("Clear saved planner data", use_container_width=True):
+        clear_persistent_state()
+        for key in [
+            "player_state", "goal_settings", "ratio_profile", "manual_mods", "manual_unlocked_gyms",
+            "gym_multiselect", "highest_unlocked_gym_selector", "manual_99k_jump_entries", "preview_days",
+            "_persistent_state_loaded", "_persistence_error",
+        ]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+    if st.session_state.get("_persistence_error"):
+        st.sidebar.warning(f"Saved data could not be loaded: {st.session_state['_persistence_error']}")
 
     st.sidebar.header("Planner assumptions")
     st.sidebar.caption("These match the locked v2 rules.")
@@ -1991,19 +2110,20 @@ def render_ratio_controls(ratio: RatioProfile) -> RatioProfile:
 def render_manual_modifier_controls() -> TrainingModifiers:
     st.subheader("Manual training modifier overrides")
     st.caption("Use these when the API does not expose a training bonus cleanly, or to test scenarios.")
+    current = st.session_state.manual_mods
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        all_gym = st.number_input("All gym gains %", value=0.0, step=0.5)
-        happy_loss_reduction = st.number_input("Gym happy loss reduction %", value=0.0, step=5.0)
+        all_gym = st.number_input("All gym gains %", value=float(current.all_gym_gains_pct), step=0.5)
+        happy_loss_reduction = st.number_input("Gym happy loss reduction %", value=float(current.happy_loss_reduction_pct), step=5.0)
     with c2:
-        strength = st.number_input("Strength gym gains %", value=0.0, step=0.5)
-        speed = st.number_input("Speed gym gains %", value=0.0, step=0.5)
+        strength = st.number_input("Strength gym gains %", value=float(current.strength_gym_gains_pct), step=0.5)
+        speed = st.number_input("Speed gym gains %", value=float(current.speed_gym_gains_pct), step=0.5)
     with c3:
-        defense = st.number_input("Defense gym gains %", value=0.0, step=0.5)
-        dexterity = st.number_input("Dexterity gym gains %", value=0.0, step=0.5)
+        defense = st.number_input("Defense gym gains %", value=float(current.defense_gym_gains_pct), step=0.5)
+        dexterity = st.number_input("Dexterity gym gains %", value=float(current.dexterity_gym_gains_pct), step=0.5)
 
-    energy_regen_bonus = st.number_input("Energy regeneration bonus %", value=0.0, step=5.0)
+    energy_regen_bonus = st.number_input("Energy regeneration bonus %", value=float(current.energy_regen_bonus_pct), step=5.0)
 
     sources = []
     if any(x != 0.0 for x in [all_gym, strength, speed, defense, dexterity, happy_loss_reduction, energy_regen_bonus]):
@@ -2504,6 +2624,7 @@ def main() -> None:
             st.success("Demo profile loaded.")
 
     if st.session_state.player_state is None:
+        save_persistent_state()
         st.info("Load demo data or sync with your API key to begin.")
         return
 
@@ -2511,6 +2632,7 @@ def main() -> None:
     st.session_state.goal_settings = render_goal_controls(st.session_state.goal_settings)
     st.session_state.ratio_profile = render_ratio_controls(st.session_state.ratio_profile)
     manual_mods = render_manual_modifier_controls()
+    st.session_state.manual_mods = manual_mods
 
     render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
     render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
