@@ -188,6 +188,8 @@ class GoalSettings:
     auto_schedule_happy_jumps: bool = True
     schedule_99k_jump: bool = False
     scheduled_99k_jump_date: date = field(default_factory=lambda: date.today() + timedelta(days=7))
+    scheduled_99k_jump_time: dtime = dtime(hour=0, minute=15)
+    current_gym_energy_progress: int = 0
     skip_war_days: bool = True
     normal_day_start_happy: int = 5_000
     happy_jump_start_happy: int = 34_000
@@ -232,6 +234,16 @@ class DailyInstruction:
     start_happy: int
     end_happy: int
     notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class GymUnlockProjection:
+    current_gym: str
+    next_gym: Optional[str]
+    current_progress: int
+    required_progress: Optional[int]
+    remaining_energy: Optional[int]
+    estimated_unlock_at: Optional[datetime]
 
 
 def build_gym_db() -> List[Gym]:
@@ -771,6 +783,159 @@ def fetch_player_state_from_api(api_key: str, manual_unlocked_gyms: Optional[Lis
     )
 
 
+def highest_unlocked_gym_index(state: PlayerState) -> int:
+    indices = [ordered_gym_names().index(name) for name in state.unlocked_gyms if name in GYM_INDEX]
+    return max(indices) if indices else 0
+
+
+def unlocked_names_through_index(highest_idx: int) -> List[str]:
+    names = ordered_gym_names()
+    highest_idx = max(0, min(highest_idx, len(names) - 1))
+    return names[: highest_idx + 1]
+
+
+def next_gym_name_for_index(highest_idx: int) -> Optional[str]:
+    names = ordered_gym_names()
+    if highest_idx + 1 < len(names):
+        return names[highest_idx + 1]
+    return None
+
+
+def next_gym_threshold_for_index(highest_idx: int) -> Optional[int]:
+    if 0 <= highest_idx < len(GYM_DB):
+        return GYM_DB[highest_idx].e_for_next_gym
+    return None
+
+
+def best_gym_for_stat_from_names(unlocked_names: List[str], stat_key: str) -> Optional[Gym]:
+    candidates = [GYM_INDEX[name] for name in unlocked_names if name in GYM_INDEX and GYM_INDEX[name].gain_for(stat_key) > 0]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda gym: (gym.gain_for(stat_key), GYM_DB.index(gym)), reverse=True)
+    return candidates[0]
+
+
+def estimate_segment_end_time(start_dt: datetime, segment_energy: int, total_day_energy: int) -> datetime:
+    if total_day_energy <= 0:
+        return start_dt
+    fraction = segment_energy / total_day_energy
+    minutes = max(1, int(round(fraction * 16 * 60)))
+    return start_dt + timedelta(minutes=minutes)
+
+
+def simulate_day_with_unlocks(
+    state: PlayerState,
+    ratio: RatioProfile,
+    goal: GoalSettings,
+    plan_day: date,
+    manual_mods: TrainingModifiers,
+    highest_idx: int,
+    progress_e: int,
+) -> Tuple[DailyInstruction, PlayerStats, int, int, Optional[datetime]]:
+    combined_mods = state.training_modifiers.merge(manual_mods)
+    projected_unlocked = unlocked_names_through_index(highest_idx)
+    projected_state = PlayerState(
+        stats=state.stats,
+        recovery=state.recovery,
+        unlocked_gyms=projected_unlocked,
+        faction_war_days=list(state.faction_war_days),
+        torn_name=state.torn_name,
+        torn_id=state.torn_id,
+        faction_id=state.faction_id,
+        faction_name=state.faction_name,
+        training_modifiers=state.training_modifiers,
+        api_notes=list(state.api_notes),
+        last_sync=state.last_sync,
+    )
+    day_type, jump_plan = day_type_for_date(projected_state, ratio, goal, plan_day, combined_mods)
+    target_stat = choose_target_stat(projected_state.stats, ratio)
+
+    if day_type == 'war':
+        instruction = DailyInstruction(plan_day, 'war', 'none', 'none', 0, 0, 0.0, 0, 0, ['Faction war day. Training skipped in baseline planner.'])
+        return instruction, state.stats, highest_idx, progress_e, None
+
+    day_energy = energy_budget_for_day(projected_state, goal, plan_day, combined_mods, day_type)
+    if day_energy <= 0:
+        instruction = DailyInstruction(plan_day, day_type, target_stat, 'none', 0, 0, 0.0, 0, 0, ['No training energy budget for this day.'])
+        return instruction, state.stats, highest_idx, progress_e, None
+
+    start_happy = projected_start_happy_for_day(projected_state, goal, plan_day, day_type)
+    current_stats = state.stats
+    current_happy = start_happy
+    total_gain = 0.0
+    total_trains = 0
+    energy_left = day_energy
+    used_gyms: List[str] = []
+    unlock_notes: List[str] = []
+    unlock_time: Optional[datetime] = None
+    time_cursor = datetime.combine(plan_day, dtime(hour=8, minute=0))
+    if jump_plan is not None and plan_day == jump_plan.execute_at.date():
+        time_cursor = jump_plan.execute_at
+
+    while energy_left > 0:
+        unlocked_names = unlocked_names_through_index(highest_idx)
+        gym = best_gym_for_stat_from_names(unlocked_names, target_stat)
+        if gym is None:
+            break
+        if gym.name not in used_gyms:
+            used_gyms.append(gym.name)
+
+        threshold = next_gym_threshold_for_index(highest_idx)
+        segment_energy = energy_left
+        if threshold is not None:
+            remaining_to_unlock = max(0, threshold - progress_e)
+            if remaining_to_unlock == 0 and next_gym_name_for_index(highest_idx) is not None:
+                unlock_notes.append(f'Projected unlock at start of day: {next_gym_name_for_index(highest_idx)}.')
+                highest_idx += 1
+                progress_e = 0
+                continue
+            if 0 < remaining_to_unlock < energy_left:
+                segment_energy = remaining_to_unlock
+
+        sim = simulate_training_block(current_stats, target_stat, gym, segment_energy, current_happy, combined_mods)
+        total_gain += float(sim['total_gain'])
+        total_trains += int(sim['trains'])
+        current_stats = current_stats.with_gain(target_stat, float(sim['total_gain']))
+        current_happy = int(sim['ending_happy'])
+        energy_left -= segment_energy
+
+        if threshold is not None:
+            progress_e += segment_energy
+            if progress_e >= threshold and next_gym_name_for_index(highest_idx) is not None:
+                overflow = progress_e - threshold
+                unlock_name = next_gym_name_for_index(highest_idx)
+                unlock_time = estimate_segment_end_time(time_cursor, segment_energy, day_energy)
+                unlock_notes.append(f'Projected unlock during day: {unlock_name} at about {unlock_time.strftime("%H:%M")}. Remaining energy shifts immediately to the better available gym.')
+                highest_idx += 1
+                progress_e = overflow
+                time_cursor = unlock_time
+                continue
+        time_cursor = estimate_segment_end_time(time_cursor, segment_energy, day_energy)
+
+    gym_name = ' → '.join(used_gyms) if used_gyms else 'unknown'
+    notes = [
+        f'Train {target_stat.title()} in {gym_name}.',
+        f'Phase: {milestone_phase(current_stats)}.',
+        f'Expected happy loss per train: {expected_happy_loss_per_train((best_gym_for_stat_from_names(unlocked_names_through_index(highest_idx), target_stat) or GYM_DB[0]).energy_cost, combined_mods)}.',
+    ]
+    if jump_plan is not None:
+        notes.append(f'Next jump window: {jump_plan.execute_at.strftime("%Y-%m-%d %H:%M")}.')
+    if day_type == 'prep':
+        notes.append('Prep day: do not assume more drug uses are possible until cooldown and stack timing allow them.')
+    elif day_type == 'happy_jump':
+        notes.append('Happy jump day: follow the timed action planner below.')
+    elif day_type == 'super_happy_jump':
+        notes.append('99k jump day: this uses your manually scheduled jump time.')
+    else:
+        notes.append('Normal training day.')
+    notes.extend(unlock_notes)
+    if combined_mods.detected_sources:
+        notes.append('Detected modifiers: ' + '; '.join(combined_mods.detected_sources[:4]))
+
+    instruction = DailyInstruction(plan_day, day_type, target_stat, gym_name, day_energy, total_trains, total_gain, start_happy, current_happy, notes)
+    return instruction, current_stats, highest_idx, progress_e, unlock_time
+
+
 def calculate_current_ratio(stats: PlayerStats) -> Dict[str, float]:
     total = max(stats.total(), 1.0)
     return {k: v / total * 100 for k, v in stats.as_dict().items()}
@@ -900,7 +1065,7 @@ def projected_start_happy_for_day(state: PlayerState, goal: GoalSettings, plan_d
 def selected_99k_execute_at(goal: GoalSettings) -> Optional[datetime]:
     if not goal.schedule_99k_jump:
         return None
-    return datetime.combine(goal.scheduled_99k_jump_date, dtime(hour=0, minute=15))
+    return datetime.combine(goal.scheduled_99k_jump_date, goal.scheduled_99k_jump_time)
 
 
 def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> datetime:
@@ -1075,7 +1240,7 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
     elif day_type == "happy_jump":
         notes.append("Happy jump day: follow the timed action planner below.")
     elif day_type == "super_happy_jump":
-        notes.append("99k jump day: this was either manually scheduled or selected by your settings.")
+        notes.append("99k jump day: this uses your manually scheduled date/time.")
     else:
         notes.append("Normal training day.")
     if combined_mods.detected_sources:
@@ -1087,13 +1252,15 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
 def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 14) -> List[DailyInstruction]:
     plan: List[DailyInstruction] = []
     projected_stats = state.stats
+    highest_idx = highest_unlocked_gym_index(state)
+    progress_e = max(0, int(goal.current_gym_energy_progress))
 
     for offset in range(days):
         plan_day = date.today() + timedelta(days=offset)
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
-            unlocked_gyms=list(state.unlocked_gyms),
+            unlocked_gyms=unlocked_names_through_index(highest_idx),
             faction_war_days=list(state.faction_war_days),
             torn_name=state.torn_name,
             torn_id=state.torn_id,
@@ -1103,10 +1270,10 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
             api_notes=list(state.api_notes),
             last_sync=state.last_sync,
         )
-        instruction = build_daily_instruction(projected_state, ratio, goal, plan_day, manual_mods)
+        instruction, projected_stats, highest_idx, progress_e, _unlock_time = simulate_day_with_unlocks(
+            projected_state, ratio, goal, plan_day, manual_mods, highest_idx, progress_e
+        )
         plan.append(instruction)
-        if instruction.target_stat in STAT_KEYS and instruction.estimated_gain > 0:
-            projected_stats = projected_stats.with_gain(instruction.target_stat, instruction.estimated_gain)
 
     return plan
 
@@ -1171,6 +1338,57 @@ def render_sidebar() -> Tuple[str, int]:
     return api_key, preview_days
 
 
+def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 90) -> GymUnlockProjection:
+    highest_idx = highest_unlocked_gym_index(state)
+    current_gym = ordered_gym_names()[highest_idx]
+    next_gym = next_gym_name_for_index(highest_idx)
+    threshold = next_gym_threshold_for_index(highest_idx)
+    progress_e = max(0, int(goal.current_gym_energy_progress))
+    if next_gym is None or threshold is None:
+        return GymUnlockProjection(current_gym=current_gym, next_gym=None, current_progress=progress_e, required_progress=None, remaining_energy=None, estimated_unlock_at=None)
+
+    projected_stats = state.stats
+    projected_highest_idx = highest_idx
+    projected_progress = progress_e
+    for offset in range(days):
+        plan_day = date.today() + timedelta(days=offset)
+        projected_state = PlayerState(
+            stats=projected_stats,
+            recovery=state.recovery,
+            unlocked_gyms=unlocked_names_through_index(projected_highest_idx),
+            faction_war_days=list(state.faction_war_days),
+            torn_name=state.torn_name,
+            torn_id=state.torn_id,
+            faction_id=state.faction_id,
+            faction_name=state.faction_name,
+            training_modifiers=state.training_modifiers,
+            api_notes=list(state.api_notes),
+            last_sync=state.last_sync,
+        )
+        _instruction, projected_stats, new_highest_idx, projected_progress, unlock_time = simulate_day_with_unlocks(
+            projected_state, ratio, goal, plan_day, manual_mods, projected_highest_idx, projected_progress
+        )
+        if new_highest_idx > projected_highest_idx:
+            return GymUnlockProjection(
+                current_gym=current_gym,
+                next_gym=next_gym,
+                current_progress=progress_e,
+                required_progress=threshold,
+                remaining_energy=max(0, threshold - progress_e),
+                estimated_unlock_at=unlock_time,
+            )
+        projected_highest_idx = new_highest_idx
+
+    return GymUnlockProjection(
+        current_gym=current_gym,
+        next_gym=next_gym,
+        current_progress=progress_e,
+        required_progress=threshold,
+        remaining_energy=max(0, threshold - progress_e),
+        estimated_unlock_at=None,
+    )
+
+
 def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     st.subheader("Goal setup")
     c1, c2 = st.columns(2)
@@ -1216,8 +1434,21 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         assumed_xanax_cooldown_hours = st.number_input("Assumed Xanax cooldown hours", min_value=1.0, value=float(goal.assumed_xanax_cooldown_hours), step=0.5)
 
     scheduled_99k_jump_date = goal.scheduled_99k_jump_date
+    scheduled_99k_jump_time = goal.scheduled_99k_jump_time
     if schedule_99k_jump:
-        scheduled_99k_jump_date = st.date_input("Planned 99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
+        c16, c17 = st.columns(2)
+        with c16:
+            scheduled_99k_jump_date = st.date_input("Planned 99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
+        with c17:
+            scheduled_99k_jump_time = st.time_input("Planned 99k jump time", value=goal.scheduled_99k_jump_time, step=timedelta(minutes=15))
+
+    current_gym_energy_progress = st.number_input(
+        "Current estimated gym energy progress toward next unlock",
+        min_value=0,
+        value=int(goal.current_gym_energy_progress),
+        step=10,
+        help="This progress is not exposed by the Torn API. Enter your estimated current progress toward the next gym unlock, like the Torntools browser extension shows.",
+    )
 
     return GoalSettings(
         target_total_stats=float(target_total),
@@ -1227,6 +1458,8 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         auto_schedule_happy_jumps=auto_schedule_happy_jumps,
         schedule_99k_jump=schedule_99k_jump,
         scheduled_99k_jump_date=scheduled_99k_jump_date,
+        scheduled_99k_jump_time=scheduled_99k_jump_time,
+        current_gym_energy_progress=int(current_gym_energy_progress),
         skip_war_days=skip_war_days,
         normal_day_start_happy=int(normal_day_start_happy),
         happy_jump_start_happy=int(happy_jump_start_happy),
@@ -1313,6 +1546,24 @@ def render_progress_section(state: PlayerState, goal: GoalSettings, ratio: Ratio
                 closeness = max(0.0, 1.0 - diff / max(target_ratio[stat_key], 1.0))
                 st.caption(f"{stat_key.title()}: {current_ratio[stat_key]:.2f}% / {target_ratio[stat_key]:.2f}%")
                 st.progress(closeness)
+
+
+def render_next_gym_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    st.subheader("Gym unlock progress")
+    projection = estimate_next_gym_unlock(state, ratio, goal, manual_mods)
+    if projection.next_gym is None or projection.required_progress is None:
+        st.write("You are already at the highest gym in the current planner database.")
+        return
+
+    st.write(f"Current highest unlocked gym: **{projection.current_gym}**")
+    st.write(f"Next gym: **{projection.next_gym}**")
+    st.write(f"Estimated progress: **{projection.current_progress:,} / {projection.required_progress:,} E**")
+    st.progress(min(1.0, projection.current_progress / max(projection.required_progress, 1)))
+    st.caption(f"Remaining energy to unlock: {projection.remaining_energy:,} E")
+    if projection.estimated_unlock_at is not None:
+        st.success(f"Projected unlock: {projection.estimated_unlock_at.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        st.info("Projected unlock is beyond the current preview window.")
 
 
 def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
@@ -1465,6 +1716,10 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
         actions.append(JumpStep(now_dt, "Drug available now", "You can take your next Xanax whenever you decide to use it."))
     if state.recovery.daily_refill_enabled:
         actions.append(JumpStep(now_dt + timedelta(minutes=10), "Use daily refill after main block", "Use refill after your main energy block if you are training today."))
+
+    projection = estimate_next_gym_unlock(state, ratio, goal, manual_mods, days=1)
+    if projection.estimated_unlock_at is not None and projection.estimated_unlock_at.date() == date.today() and projection.next_gym is not None:
+        actions.append(JumpStep(projection.estimated_unlock_at, "Next gym unlocks", f"Projected unlock: {projection.next_gym}. Move into the new gym as soon as it opens in the plan."))
     return actions
 
 
@@ -1628,6 +1883,7 @@ def main() -> None:
     manual_mods = render_manual_modifier_controls()
 
     render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
+    render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
     render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
     render_unlocked_gym_editor(player_state)
     render_war_calendar_editor(player_state)
