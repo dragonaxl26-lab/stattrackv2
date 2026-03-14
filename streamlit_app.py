@@ -354,6 +354,7 @@ class GoalSettings:
     scheduled_99k_jump_time: dtime = dtime(hour=0, minute=15)
     manual_99k_jump_schedule_text: str = ""
     current_gym_energy_progress: int = 0
+    gym_progress_as_of_date: date = field(default_factory=local_today)
     skip_war_days: bool = True
     normal_day_start_happy: int = 5_000
     happy_jump_start_happy: int = 34_000
@@ -1180,7 +1181,10 @@ def fetch_player_state_from_api(api_key: str, manual_unlocked_gyms: Optional[Lis
             elif target == "faction_upgrades":
                 faction_upgrades = payload
         except TornAPIError as exc:
-            api_notes.append(f"{path_name} skipped: {exc}")
+            if path_name == "/faction/upgrades" and "Incorrect ID-entity relation" in str(exc):
+                pass
+            else:
+                api_notes.append(f"{path_name} skipped: {exc}")
 
     if not faction_name and isinstance(faction_basic, dict):
         faction_name = _safe_str(_first_present(faction_basic, [("name",), ("faction", "name")], default=""))
@@ -1988,6 +1992,47 @@ def render_sidebar() -> Tuple[str, int]:
     return api_key, preview_days
 
 
+def auto_advance_gym_energy_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> GoalSettings:
+    """Auto-advance the manually seeded gym progress by completed planner days.
+
+    Torn does not expose gym unlock energy progress through the API, so this uses
+    the planner's completed-day assumptions to keep the value moving after the user
+    seeds it once. It only advances through fully completed local days to avoid
+    claiming intra-day precision that the API cannot verify.
+    """
+    as_of = getattr(goal, "gym_progress_as_of_date", local_today())
+    if as_of >= local_today():
+        return goal
+
+    highest_idx = highest_unlocked_gym_index(state)
+    projected_progress = max(0, int(goal.current_gym_energy_progress))
+    projected_stats = state.stats
+    projected_highest_idx = highest_idx
+
+    day = as_of
+    while day < local_today():
+        projected_state = PlayerState(
+            stats=projected_stats,
+            recovery=state.recovery,
+            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx),
+            faction_war_days=list(state.faction_war_days),
+            torn_name=state.torn_name,
+            torn_id=state.torn_id,
+            faction_id=state.faction_id,
+            faction_name=state.faction_name,
+            training_modifiers=state.training_modifiers,
+            api_notes=list(state.api_notes),
+            last_sync=state.last_sync,
+        )
+        _, projected_stats, projected_highest_idx, projected_progress, _ = simulate_day_with_unlocks(
+            projected_state, ratio, goal, day, manual_mods, projected_highest_idx, projected_progress
+        )
+        day += timedelta(days=1)
+
+    updated = GoalSettings(**{**goal.__dict__, "current_gym_energy_progress": int(projected_progress), "gym_progress_as_of_date": local_today()})
+    return updated
+
+
 def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 90) -> GymUnlockProjection:
     highest_idx = highest_unlocked_gym_index(state)
     current_gym = linear_gym_names()[highest_idx]
@@ -2232,12 +2277,13 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         manual_99k_jump_schedule_text = ""
         st.session_state.manual_99k_jump_entries = []
 
+    st.caption(f"Gym unlock progress auto-tracks once seeded. Current auto-tracked estimate is as of **{getattr(goal, 'gym_progress_as_of_date', local_today()).isoformat()}**.")
     current_gym_energy_progress = st.number_input(
-        "Current estimated gym energy progress toward next unlock",
+        "Gym energy progress seed / manual override",
         min_value=0,
         value=int(goal.current_gym_energy_progress),
         step=10,
-        help="This progress is not exposed by the Torn API. Enter your estimated current progress toward the next gym unlock, like the Torntools browser extension shows.",
+        help="Seed this once from Torntools, then the app will auto-advance it by completed planner days. Change it again any time you want to re-anchor the estimate.",
     )
 
     st.subheader("Extra energy sources & setbacks")
@@ -2291,6 +2337,7 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         scheduled_99k_jump_time=scheduled_99k_jump_time,
         manual_99k_jump_schedule_text=manual_99k_jump_schedule_text,
         current_gym_energy_progress=int(current_gym_energy_progress),
+        gym_progress_as_of_date=(local_today() if int(current_gym_energy_progress) != int(goal.current_gym_energy_progress) else getattr(goal, 'gym_progress_as_of_date', local_today())),
         skip_war_days=skip_war_days,
         normal_day_start_happy=int(normal_day_start_happy),
         happy_jump_start_happy=int(happy_jump_start_happy),
