@@ -1366,7 +1366,10 @@ def simulate_day_with_unlocks(
         last_sync=state.last_sync,
     )
     day_type, jump_plan = day_type_for_date(projected_state, ratio, goal, plan_day, combined_mods)
-    target_stat = choose_target_stat(projected_state.stats, ratio)
+    if jump_plan is not None and day_type in {'prep', 'happy_jump', 'super_happy_jump'}:
+        target_stat = jump_plan.target_stat
+    else:
+        target_stat = choose_target_stat(projected_state.stats, ratio)
 
     if day_type == 'war':
         instruction = DailyInstruction(plan_day, 'war', 'none', 'none', 0, 0, 0.0, 0, 0, ['Faction war day. Training skipped in baseline planner.'])
@@ -1834,8 +1837,12 @@ def energy_budget_for_day(state: PlayerState, goal: GoalSettings, plan_day: date
 def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, plan_day: date, manual_mods: TrainingModifiers) -> DailyInstruction:
     combined_mods = state.training_modifiers.merge(manual_mods)
     day_type, jump_plan = day_type_for_date(state, ratio, goal, plan_day, combined_mods)
-    target_stat = choose_target_stat(state.stats, ratio)
-    gym = best_gym_for_stat(state, target_stat)
+    if jump_plan is not None and day_type in {'prep', 'happy_jump', 'super_happy_jump'}:
+        target_stat = jump_plan.target_stat
+        gym = GYM_INDEX.get(jump_plan.gym_name) or best_gym_for_stat(state, target_stat)
+    else:
+        target_stat = choose_target_stat(state.stats, ratio)
+        gym = best_gym_for_stat(state, target_stat)
 
     if day_type == "war":
         return DailyInstruction(plan_day, "war", "none", "none", 0, 0, 0.0, 0, 0, ["Faction war day. Training skipped in baseline planner."])
