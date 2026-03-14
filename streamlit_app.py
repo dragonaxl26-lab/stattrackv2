@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ import streamlit as st
 
 
 # ============================================================
-# Torn Stat Tracker v2 - Merged Build
+# Torn Stat Tracker v2 - Merged Build (fixed)
 # ------------------------------------------------------------
 # Includes:
 # - Torn API v2 sync
@@ -20,6 +21,8 @@ import streamlit as st
 # - Auto-detected and manual training modifiers
 # - Jump scheduler merged into the same gain model
 # - War / non-training day handling
+# - Battlestats parser fix for Torn v2 nested value objects
+# - Stable unlocked gym multiselect with quick-fill helper
 # ============================================================
 
 STAT_KEYS = ["strength", "speed", "defense", "dexterity"]
@@ -41,10 +44,6 @@ TORN_V2_BASE_URL = "https://api.torn.com/v2"
 TORN_API_TIMEOUT_SECONDS = 20
 TORN_API_COMMENT = "torn-stat-tracker-v2"
 
-
-# ------------------------------------------------------------
-# Data models
-# ------------------------------------------------------------
 
 @dataclass
 class PlayerStats:
@@ -272,7 +271,7 @@ def _clean_api_key(api_key: str) -> str:
 
 
 def _api_headers() -> Dict[str, str]:
-    return {"Accept": "application/json", "User-Agent": "TornStatTrackerV2/merged"}
+    return {"Accept": "application/json", "User-Agent": "TornStatTrackerV2/fixed"}
 
 
 def _api_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -487,12 +486,33 @@ def _parse_battlestats(payload: Dict[str, Any]) -> PlayerStats:
             break
 
     def get_stat(stat_name: str) -> float:
-        direct = _first_present(stats_root, [(stat_name,), (f"{stat_name}_info", "value")], default=None)
+        blob = stats_root.get(stat_name)
+
+        if isinstance(blob, dict):
+            value = _safe_float(blob.get("value"), 0.0)
+            modifier = _safe_float(blob.get("modifier"), 0.0)
+            if value > 0:
+                mult = 1.0 + (modifier / 100.0)
+                if mult > 0:
+                    return value / mult
+                return value
+
+        direct = _first_present(
+            stats_root,
+            [
+                (stat_name,),
+                (stat_name, "value"),
+                (f"{stat_name}_info", "value"),
+            ],
+            default=None,
+        )
         if direct is not None:
             return _safe_float(direct, 0.0)
+
         recursive = _find_first_numeric_for_key(payload, stat_name)
         if recursive is not None:
             return float(recursive)
+
         return 0.0
 
     return PlayerStats(
@@ -1074,6 +1094,8 @@ def init_state() -> None:
         st.session_state.manual_unlocked_gyms = []
     if "gym_multiselect" not in st.session_state:
         st.session_state.gym_multiselect = []
+    if "highest_unlocked_gym_selector" not in st.session_state:
+        st.session_state.highest_unlocked_gym_selector = "-- none --"
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -1239,11 +1261,41 @@ def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: 
 def render_unlocked_gym_editor(state: PlayerState) -> None:
     st.subheader("Unlocked gyms")
     st.caption("Live API sync may not expose unlocked gyms directly. Use this as the source of truth whenever needed.")
-    current_selection = state.unlocked_gyms or st.session_state.manual_unlocked_gyms
-    selected = st.multiselect("Select the gyms you currently have unlocked", options=ordered_gym_names(), default=current_selection)
-    ordered_selection = [name for name in ordered_gym_names() if name in selected]
+
+    gym_names = ordered_gym_names()
+
+    if state.unlocked_gyms and set(state.unlocked_gyms) != set(st.session_state.gym_multiselect):
+        st.session_state.gym_multiselect = list(state.unlocked_gyms)
+    elif (not st.session_state.gym_multiselect) and st.session_state.manual_unlocked_gyms:
+        st.session_state.gym_multiselect = list(st.session_state.manual_unlocked_gyms)
+
+    c1, c2 = st.columns([3, 1])
+
+    with c1:
+        selected = st.multiselect(
+            "Select the gyms you currently have unlocked",
+            options=gym_names,
+            key="gym_multiselect",
+        )
+
+    with c2:
+        highest_gym = st.selectbox(
+            "Quick fill to highest unlocked gym",
+            options=["-- none --"] + gym_names,
+            index=0 if st.session_state.highest_unlocked_gym_selector not in gym_names else (gym_names.index(st.session_state.highest_unlocked_gym_selector) + 1),
+            key="highest_unlocked_gym_selector",
+        )
+
+        if highest_gym != "-- none --":
+            highest_idx = gym_names.index(highest_gym)
+            filled = gym_names[: highest_idx + 1]
+            st.session_state.gym_multiselect = filled
+            selected = filled
+
+    ordered_selection = [name for name in gym_names if name in selected]
     st.session_state.manual_unlocked_gyms = ordered_selection
     state.unlocked_gyms = ordered_selection
+
     if ordered_selection:
         st.caption(f"Highest unlocked gym in planner: {ordered_selection[-1]}")
     else:
