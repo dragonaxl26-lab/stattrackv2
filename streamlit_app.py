@@ -2861,12 +2861,199 @@ def render_gain_debug_panel(state: PlayerState, goal: GoalSettings, ratio: Ratio
     st.dataframe(rows, use_container_width=True)
 
 
+
+
+def inject_torn_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: linear-gradient(180deg, #141414 0%, #101010 55%, #0b0b0b 100%);
+            color: #e8e8e8;
+        }
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
+        h1, h2, h3 {
+            color: #f2f2f2 !important;
+            letter-spacing: 0.02em;
+        }
+        div[data-baseweb="tab-list"] {
+            gap: 0.35rem;
+            background: rgba(255,255,255,0.02);
+            padding: 0.35rem;
+            border-radius: 0.9rem;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        button[data-baseweb="tab"] {
+            background: #171717 !important;
+            border-radius: 0.8rem !important;
+            border: 1px solid rgba(255,255,255,0.06) !important;
+            color: #d6d6d6 !important;
+        }
+        button[data-baseweb="tab"][aria-selected="true"] {
+            background: linear-gradient(180deg, #8e2323 0%, #5f1313 100%) !important;
+            color: #ffffff !important;
+            border-color: rgba(255,255,255,0.14) !important;
+        }
+        .torn-hero {
+            background: linear-gradient(135deg, rgba(120,19,19,0.95) 0%, rgba(66,10,10,0.95) 55%, rgba(21,21,21,0.98) 100%);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 20px;
+            padding: 1.2rem 1.35rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        }
+        .torn-hero-title {
+            font-size: 1.9rem;
+            font-weight: 800;
+            color: white;
+            margin-bottom: 0.15rem;
+        }
+        .torn-hero-sub {
+            color: #f2dede;
+            font-size: 0.95rem;
+        }
+        .calendar-cell {
+            background: #151515;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-left: 4px solid #444;
+            border-radius: 16px;
+            padding: 0.7rem 0.75rem;
+            min-height: 156px;
+            margin-bottom: 0.65rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+        }
+        .calendar-empty {
+            background: rgba(255,255,255,0.02);
+            border: 1px dashed rgba(255,255,255,0.06);
+            border-radius: 16px;
+            min-height: 156px;
+            margin-bottom: 0.65rem;
+        }
+        .calendar-date {
+            font-weight: 800;
+            color: #ffffff;
+            margin-bottom: 0.35rem;
+            font-size: 0.98rem;
+        }
+        .calendar-meta {
+            color: #d7d7d7;
+            font-size: 0.8rem;
+            line-height: 1.35;
+            margin-top: 0.2rem;
+        }
+        .calendar-badge {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 0.14rem 0.48rem;
+            font-size: 0.72rem;
+            font-weight: 700;
+            margin-bottom: 0.45rem;
+            background: rgba(255,255,255,0.08);
+            color: #f5f5f5;
+        }
+        .day-normal { border-left-color: #5d5d5d; }
+        .day-prep { border-left-color: #cc8b12; }
+        .day-happy_jump { border-left-color: #a43bf5; }
+        .day-super_happy_jump { border-left-color: #ff5b5b; }
+        .day-war { border-left-color: #8a2020; }
+        .day-blocked { border-left-color: #666666; }
+        .day-happy-jump .calendar-badge, .day-happy_jump .calendar-badge { background: rgba(164,59,245,0.24); }
+        .day-super_happy_jump .calendar-badge { background: rgba(255,91,91,0.22); }
+        .day-prep .calendar-badge { background: rgba(204,139,18,0.25); }
+        .day-war .calendar-badge { background: rgba(138,32,32,0.28); }
+        .section-chip {
+            display: inline-block;
+            margin-right: 0.4rem;
+            padding: 0.18rem 0.55rem;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.06);
+            color: #eaeaea;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_torn_hero() -> None:
+    st.markdown(
+        f"""
+        <div class="torn-hero">
+            <div class="torn-hero-title">Torn Stat Tracker v2</div>
+            <div class="torn-hero-sub">Torn-themed planning console for training, jumps, gym unlocks, and daily execution. Times shown in {APP_TIMEZONE_LABEL}.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _calendar_day_html(item: DailyInstruction, today: date) -> str:
+    day_class = item.day_type.replace(' ', '_')
+    date_str = item.plan_date.strftime('%b %d')
+    badge = item.day_type.replace('_', ' ').title()
+    today_chip = ' <span class="section-chip">Today</span>' if item.plan_date == today else ''
+    return f"""
+    <div class="calendar-cell day-{day_class}">
+        <div class="calendar-date">{date_str}{today_chip}</div>
+        <div class="calendar-badge">{badge}</div>
+        <div class="calendar-meta"><strong>Gym:</strong> {item.gym_name}</div>
+        <div class="calendar-meta"><strong>Train:</strong> {item.target_stat.title() if item.target_stat != 'none' else 'None'}</div>
+        <div class="calendar-meta"><strong>Energy:</strong> {item.estimated_energy:,}</div>
+        <div class="calendar-meta"><strong>Gain:</strong> {item.estimated_gain:,.0f}</div>
+    </div>
+    """
+
+
+def render_calendar_tab(plan: List[DailyInstruction]) -> None:
+    st.subheader("Training calendar")
+    if not plan:
+        st.info("No calendar data available yet.")
+        return
+
+    today = local_today()
+    plan_map = {item.plan_date: item for item in plan}
+    first_day = plan[0].plan_date
+    last_day = plan[-1].plan_date
+    grid_start = first_day - timedelta(days=first_day.weekday())
+    grid_end = last_day + timedelta(days=(6 - last_day.weekday()))
+
+    header_cols = st.columns(7)
+    for col, label in zip(header_cols, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
+        with col:
+            st.caption(f"**{label}**")
+
+    cursor = grid_start
+    while cursor <= grid_end:
+        cols = st.columns(7)
+        for col_idx in range(7):
+            day = cursor + timedelta(days=col_idx)
+            with cols[col_idx]:
+                item = plan_map.get(day)
+                if item is None:
+                    st.markdown('<div class="calendar-empty"></div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(_calendar_day_html(item, today), unsafe_allow_html=True)
+        cursor += timedelta(days=7)
+
+
+def render_setup_tab() -> TrainingModifiers:
+    st.subheader("Planner setup")
+    st.caption("All planning inputs live here so the rest of the app can focus on results.")
+    st.session_state.goal_settings = render_goal_controls(st.session_state.goal_settings)
+    st.session_state.ratio_profile = render_ratio_controls(st.session_state.ratio_profile)
+    manual_mods = render_manual_modifier_controls()
+    st.session_state.manual_mods = manual_mods
+    return manual_mods
 def main() -> None:
     st.set_page_config(page_title="Torn Stat Tracker v2", layout="wide")
     init_state()
-
-    st.title("Torn Stat Tracker v2")
-    st.caption("Day-by-day battle stat planner with Baldr ratio, gym optimization, merged jump scheduling, real gain simulation, and war-day handling.")
+    inject_torn_theme()
+    render_torn_hero()
 
     api_key, preview_days = render_sidebar()
 
@@ -2899,35 +3086,48 @@ def main() -> None:
         st.info("Load demo data or sync with your API key to begin.")
         return
 
-    player_state: PlayerState = st.session_state.player_state
-    st.session_state.goal_settings = render_goal_controls(st.session_state.goal_settings)
-    st.session_state.ratio_profile = render_ratio_controls(st.session_state.ratio_profile)
-    manual_mods = render_manual_modifier_controls()
-    st.session_state.manual_mods = manual_mods
+    tabs = st.tabs(["Overview", "Setup", "Progress", "Gyms", "Calendar"])
 
-    render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
-    render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-    render_frontline_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-    render_support_status(st.session_state.goal_settings)
-    render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
-    render_unlocked_gym_editor(player_state)
-    render_war_calendar_editor(player_state)
-    render_today_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-    render_jump_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-    render_99k_optimizer_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-    render_daily_planner_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-    render_jump_sequence_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+    with tabs[1]:
+        manual_mods = render_setup_tab()
+        st.subheader("War and schedule inputs")
+        render_war_calendar_editor(st.session_state.player_state)
+
+    player_state: PlayerState = st.session_state.player_state
+    if "manual_mods" not in st.session_state:
+        st.session_state.manual_mods = TrainingModifiers()
+    manual_mods = st.session_state.manual_mods
 
     plan = build_plan_preview(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods, days=preview_days)
-    render_plan_table(plan)
-    render_forecast(player_state, st.session_state.goal_settings, manual_mods)
-    render_gain_debug_panel(player_state, st.session_state.goal_settings, st.session_state.ratio_profile, manual_mods)
 
-    st.subheader("Next implementation targets")
-    st.write("1. Add alternate 99k recipes and exact item counts for your preferred method.")
-    st.write("2. Add richer faction upgrade parsing from the live upgrades payload.")
-    st.write("3. Add export / save functionality for the training plan.")
-    st.write("4. Add calendar import / reminder export for jump schedules.")
+    with tabs[0]:
+        render_player_snapshot(player_state, st.session_state.goal_settings, manual_mods)
+        render_support_status(st.session_state.goal_settings)
+        render_today_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        render_jump_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        render_99k_optimizer_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+
+    with tabs[2]:
+        render_progress_section(player_state, st.session_state.goal_settings, st.session_state.ratio_profile)
+        render_forecast(player_state, st.session_state.goal_settings, manual_mods)
+        with st.expander("Gain engine debug"):
+            render_gain_debug_panel(player_state, st.session_state.goal_settings, st.session_state.ratio_profile, manual_mods)
+
+    with tabs[3]:
+        render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        render_frontline_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        render_unlocked_gym_editor(player_state)
+
+    with tabs[4]:
+        render_calendar_tab(plan)
+        st.subheader("Today’s timed actions")
+        render_daily_planner_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        with st.expander("Jump sequence"):
+            render_jump_sequence_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        with st.expander("Plan preview table"):
+            render_plan_table(plan)
+
+    save_persistent_state()
 
 
 if __name__ == "__main__":
