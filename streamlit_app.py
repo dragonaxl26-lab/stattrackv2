@@ -823,6 +823,65 @@ def estimate_segment_end_time(start_dt: datetime, segment_energy: int, total_day
     return start_dt + timedelta(minutes=minutes)
 
 
+def end_of_day(dt: datetime) -> datetime:
+    return dt.replace(hour=23, minute=59, second=59, microsecond=0)
+
+
+def natural_energy_between(state: PlayerState, mods: TrainingModifiers, start_dt: datetime, end_dt: datetime) -> int:
+    if end_dt <= start_dt:
+        return 0
+    minutes = (end_dt - start_dt).total_seconds() / 60.0
+    if minutes <= 0:
+        return 0
+    daily_natural = state.recovery.natural_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    return max(0, int(minutes / 1440.0 * daily_natural))
+
+
+def build_today_energy_blocks(state: PlayerState, goal: GoalSettings, mods: TrainingModifiers, now_dt: Optional[datetime] = None) -> List[Tuple[datetime, int, str]]:
+    now_dt = now_dt or datetime.now()
+    blocks: List[Tuple[datetime, int, str]] = []
+
+    if state.recovery.current_energy > 0:
+        blocks.append((now_dt, int(state.recovery.current_energy), 'current energy'))
+
+    if state.recovery.daily_refill_enabled:
+        refill_time = now_dt + timedelta(minutes=10)
+        blocks.append((refill_time, int(state.recovery.refill_energy), 'daily refill'))
+
+    eod = end_of_day(now_dt)
+    natural_e = natural_energy_between(state, mods, now_dt, eod)
+    if natural_e > 0:
+        blocks.append((eod, natural_e, 'natural regen through end of day'))
+
+    drug_clear_dt = now_dt + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
+    if drug_clear_dt.date() == now_dt.date() and state.recovery.drug_cd_minutes > 0:
+        blocks.append((drug_clear_dt, int(state.recovery.xanax_energy), 'next xanax after cooldown'))
+
+    return blocks
+
+
+def estimate_today_unlock_from_blocks(state: PlayerState, goal: GoalSettings, mods: TrainingModifiers, now_dt: Optional[datetime] = None) -> Optional[Tuple[datetime, str]]:
+    now_dt = now_dt or datetime.now()
+    highest_idx = highest_unlocked_gym_index(state)
+    next_gym = next_gym_name_for_index(highest_idx)
+    threshold = next_gym_threshold_for_index(highest_idx)
+    progress = max(0, int(goal.current_gym_energy_progress))
+    if next_gym is None or threshold is None:
+        return None
+
+    remaining = threshold - progress
+    if remaining <= 0:
+        return (now_dt, next_gym)
+
+    blocks = sorted(build_today_energy_blocks(state, goal, mods, now_dt), key=lambda x: x[0])
+    accumulated = 0
+    for when, energy, _source in blocks:
+        accumulated += energy
+        if accumulated >= remaining:
+            return (when, next_gym)
+    return None
+
+
 def simulate_day_with_unlocks(
     state: PlayerState,
     ratio: RatioProfile,
@@ -1709,17 +1768,31 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
     if jump_plan is not None and today_type in {"prep", "happy_jump", "super_happy_jump"}:
         return [step for step in build_jump_sequence(state, goal, jump_plan) if step.when.date() == date.today()]
 
-    actions.append(JumpStep(now_dt, "Train current energy", f"Train your current {state.recovery.current_energy} energy into {target_stat.title()} at {gym.name}."))
+    if state.recovery.current_energy > 0:
+        actions.append(JumpStep(now_dt, "Train current energy", f"Train your current {state.recovery.current_energy} energy into {target_stat.title()} at {gym.name}."))
+
+    if state.recovery.daily_refill_enabled:
+        refill_dt = now_dt + timedelta(minutes=10)
+        actions.append(JumpStep(refill_dt, "Use daily refill", "Use your daily refill after your current energy block if you are training today."))
+        actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
+
+    natural_e = natural_energy_between(state, combined_mods, now_dt, end_of_day(now_dt))
+    if natural_e > 0:
+        actions.append(JumpStep(end_of_day(now_dt), "Natural regen through end of day", f"About {natural_e} natural energy will regenerate by the end of today at your current regen rate."))
+
     if state.recovery.drug_cd_minutes > 0:
-        actions.append(JumpStep(now_dt + timedelta(minutes=state.recovery.drug_cd_minutes), "Drug cooldown clears", "You cannot take another Xanax until this time."))
+        drug_clear_dt = now_dt + timedelta(minutes=state.recovery.drug_cd_minutes)
+        actions.append(JumpStep(drug_clear_dt, "Drug cooldown clears", "You cannot take another Xanax until this time."))
+        if drug_clear_dt.date() == now_dt.date():
+            actions.append(JumpStep(drug_clear_dt + timedelta(minutes=1), "Take next Xanax", f"If you are following the baseline plan, take Xanax at cooldown clear and train the extra {state.recovery.xanax_energy} energy after it lands."))
     else:
         actions.append(JumpStep(now_dt, "Drug available now", "You can take your next Xanax whenever you decide to use it."))
-    if state.recovery.daily_refill_enabled:
-        actions.append(JumpStep(now_dt + timedelta(minutes=10), "Use daily refill after main block", "Use refill after your main energy block if you are training today."))
 
-    projection = estimate_next_gym_unlock(state, ratio, goal, manual_mods, days=1)
-    if projection.estimated_unlock_at is not None and projection.estimated_unlock_at.date() == date.today() and projection.next_gym is not None:
-        actions.append(JumpStep(projection.estimated_unlock_at, "Next gym unlocks", f"Projected unlock: {projection.next_gym}. Move into the new gym as soon as it opens in the plan."))
+    unlock_today = estimate_today_unlock_from_blocks(state, goal, combined_mods, now_dt)
+    if unlock_today is not None:
+        unlock_dt, next_gym = unlock_today
+        actions.append(JumpStep(unlock_dt, "Next gym unlocks", f"Projected unlock: {next_gym}. This estimate only uses today's current energy, refill, natural regen, and a same-day Xanax if cooldown clears today."))
+
     return actions
 
 
