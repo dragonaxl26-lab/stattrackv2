@@ -381,6 +381,8 @@ class GoalSettings:
     can_count_available: int = 0
     can_energy_per_can: int = 25
     can_cooldown_hours: float = 2.0
+    fhc_cooldown_hours: float = 6.0
+    max_daily_booster_cooldown_hours: float = 24.0
     today_energy_loss_adjustment: int = 0
     forecast_energy_loss_per_day: int = 0
 
@@ -490,7 +492,78 @@ def estimate_required_extra_energy_for_day(projected_state: PlayerState, ratio: 
     return max(0, math.ceil(extra_gain_needed / gain_per_energy))
 
 
-def allocate_support_energy(goal: GoalSettings, inventory: SupportInventory, plan_day: date, required_extra_energy: int) -> Tuple[int, List[str], List[Tuple[str, int, int]]]:
+def booster_horizon_minutes(goal: GoalSettings) -> int:
+    return max(0, int(round(float(goal.max_daily_booster_cooldown_hours) * 60)))
+
+
+def booster_daily_capacity_minutes(goal: GoalSettings, booster_cd_minutes: int = 0) -> int:
+    return max(0, booster_horizon_minutes(goal) - max(0, int(booster_cd_minutes)))
+
+
+
+def choose_booster_mix(
+    goal: GoalSettings,
+    fhc_available: int,
+    cans_available: int,
+    required_energy: int,
+    booster_cd_minutes: int = 0,
+) -> Tuple[int, int, Optional[str], int]:
+    fhc_cd = max(0, int(round(float(goal.fhc_cooldown_hours) * 60)))
+    can_cd = max(0, int(round(float(goal.can_cooldown_hours) * 60)))
+    fhc_energy = max(1, int(goal.fhc_effective_energy))
+    can_energy = max(1, int(goal.can_energy_per_can))
+    capacity = booster_daily_capacity_minutes(goal, booster_cd_minutes)
+
+    best_choice: Optional[Tuple[int, int, Optional[str], int, int, int]] = None
+    # tuple: (fhc_count, can_count, last_free, energy, overage, cooldown_used)
+    for fhc_count in range(0, max(0, int(fhc_available)) + 1):
+        for can_count in range(0, max(0, int(cans_available)) + 1):
+            if fhc_count == 0 and can_count == 0:
+                continue
+            possible_last: List[Optional[str]] = []
+            if fhc_count > 0:
+                possible_last.append('FHC')
+            if can_count > 0:
+                possible_last.append('Energy can')
+            for last_free in possible_last:
+                used_minutes = fhc_cd * fhc_count + can_cd * can_count
+                if last_free == 'FHC':
+                    used_minutes -= fhc_cd
+                elif last_free == 'Energy can':
+                    used_minutes -= can_cd
+                if used_minutes > capacity:
+                    continue
+                energy = fhc_count * fhc_energy + can_count * can_energy
+                overage = max(0, energy - max(0, int(required_energy)))
+                candidate = (fhc_count, can_count, last_free, energy, overage, used_minutes)
+                if best_choice is None:
+                    best_choice = candidate
+                    continue
+                _, _, _, best_energy, best_overage, best_used = best_choice
+                req = max(0, int(required_energy))
+                if energy >= req and best_energy < req:
+                    best_choice = candidate
+                elif energy >= req and best_energy >= req:
+                    if overage < best_overage or (overage == best_overage and used_minutes < best_used) or (overage == best_overage and used_minutes == best_used and energy < best_energy):
+                        best_choice = candidate
+                elif energy < req and best_energy < req:
+                    if energy > best_energy or (energy == best_energy and used_minutes < best_used):
+                        best_choice = candidate
+
+    if best_choice is None:
+        return 0, 0, None, 0
+    fhc_count, can_count, last_free, energy, _overage, _used = best_choice
+    return fhc_count, can_count, last_free, energy
+
+
+
+def allocate_support_energy(
+    goal: GoalSettings,
+    inventory: SupportInventory,
+    plan_day: date,
+    required_extra_energy: int,
+    booster_cd_minutes: int = 0,
+) -> Tuple[int, List[str], List[Tuple[str, int, int]]]:
     refresh_support_inventory_for_day(goal, inventory, plan_day)
     if required_extra_energy <= 0:
         return 0, [], []
@@ -526,47 +599,50 @@ def allocate_support_energy(goal: GoalSettings, inventory: SupportInventory, pla
                 allocations.append(("Job points", jp_use, energy_added))
                 notes.append(f"Spend {jp_use} job points for {energy_added} extra energy once your company is 10★.")
 
-    if goal.fhc_allowed and inventory.fhc_remaining > 0 and remaining > 0:
-        fhc_energy = max(1, int(goal.fhc_effective_energy))
-        fhc_use = min(inventory.fhc_remaining, math.ceil(remaining / fhc_energy))
+    fhc_available = inventory.fhc_remaining if goal.fhc_allowed else 0
+    cans_available = inventory.cans_remaining if goal.cans_allowed else 0
+    if (fhc_available > 0 or cans_available > 0) and remaining > 0:
+        booster_minutes = booster_cd_minutes if plan_day == local_today() else 0
+        fhc_use, can_use, _last_free, booster_energy = choose_booster_mix(goal, fhc_available, cans_available, remaining, booster_cd_minutes=booster_minutes)
         if fhc_use > 0:
-            energy_added = fhc_use * fhc_energy
+            energy_added = fhc_use * max(1, int(goal.fhc_effective_energy))
             inventory.fhc_remaining -= fhc_use
             total_added += energy_added
             remaining -= energy_added
             allocations.append(("FHC", fhc_use, energy_added))
-            notes.append(f"Use {fhc_use} FHC(s) for about {energy_added} extra energy.")
-
-    if goal.cans_allowed and inventory.cans_remaining > 0 and remaining > 0:
-        can_energy = max(1, int(goal.can_energy_per_can))
-        can_use = min(inventory.cans_remaining, math.ceil(remaining / can_energy))
+            notes.append(f"Use {fhc_use} FHC(s) for about {energy_added} extra energy within your booster cooldown limit.")
         if can_use > 0:
-            energy_added = can_use * can_energy
+            energy_added = can_use * max(1, int(goal.can_energy_per_can))
             inventory.cans_remaining -= can_use
             total_added += energy_added
             remaining -= energy_added
             allocations.append(("Energy can", can_use, energy_added))
-            notes.append(f"Use {can_use} can(s) for about {energy_added} extra energy.")
+            notes.append(f"Use {can_use} can(s) for about {energy_added} extra energy within your booster cooldown limit.")
+        if booster_energy <= 0 and remaining > 0:
+            notes.append("Booster items are capped by your daily booster cooldown limit, so the planner could not add more support energy today.")
 
     return total_added, notes, allocations
 
 
+
 def total_support_energy_available_until_target(goal: GoalSettings) -> Tuple[int, int]:
-    days_to_target = max(1, (goal.target_date - local_today()).days + 1)
     total = 0
-    if goal.use_job_points_energy:
-        jp_available = max(0, int(goal.current_job_points) - int(goal.reserve_job_points))
-        days_active = max(0, (goal.target_date - company_10_star_activation_date(goal)).days + 1)
-        total += min(jp_available, days_active * int(goal.job_points_daily_limit)) * int(goal.job_energy_per_point)
-    total += max(0, int(goal.mcs_ready_claims_now)) * int(goal.mcs_energy_per_claim)
-    next_ready = mcs_next_ready_local(goal)
-    while next_ready.date() <= goal.target_date:
-        total += int(goal.mcs_energy_per_claim)
-        next_ready += timedelta(days=7)
-    if goal.fhc_allowed:
-        total += max(0, int(goal.fhc_count_available)) * int(goal.fhc_effective_energy)
-    if goal.cans_allowed:
-        total += max(0, int(goal.can_count_available)) * int(goal.can_energy_per_can)
+    inventory = init_support_inventory(goal)
+    days_to_target = max(1, (goal.target_date - local_today()).days + 1)
+    for offset in range(days_to_target):
+        plan_day = local_today() + timedelta(days=offset)
+        refresh_support_inventory_for_day(goal, inventory, plan_day)
+        total += inventory.mcs_ready_claims * int(goal.mcs_energy_per_claim)
+        inventory.mcs_ready_claims = 0
+        if goal.use_job_points_energy and company_10_star_active_on(goal, plan_day):
+            jp_available = max(0, inventory.job_points_remaining - max(0, int(goal.reserve_job_points)))
+            jp_today = min(jp_available, max(0, int(goal.job_points_daily_limit)))
+            total += jp_today * int(goal.job_energy_per_point)
+            inventory.job_points_remaining -= jp_today
+        fhc_use, can_use, _last_free, booster_energy = choose_booster_mix(goal, inventory.fhc_remaining if goal.fhc_allowed else 0, inventory.cans_remaining if goal.cans_allowed else 0, 10**9, booster_cd_minutes=0)
+        total += booster_energy
+        inventory.fhc_remaining -= fhc_use
+        inventory.cans_remaining -= can_use
     return total, max(0, int(total / days_to_target))
 
 
@@ -1748,7 +1824,7 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
             last_sync=state.last_sync,
         )
         extra_energy_needed = estimate_required_extra_energy_for_day(projected_state, ratio, goal, manual_mods, plan_day)
-        support_bonus, support_notes, _allocs = allocate_support_energy(goal, support_inventory, plan_day, extra_energy_needed)
+        support_bonus, support_notes, _allocs = allocate_support_energy(goal, support_inventory, plan_day, extra_energy_needed, booster_cd_minutes=projected_state.recovery.booster_cd_minutes if plan_day == local_today() else 0)
         instruction, projected_stats, highest_idx, progress_e, _unlock_time = simulate_day_with_unlocks(
             projected_state, ratio, goal, plan_day, manual_mods, highest_idx, progress_e, support_bonus_energy=support_bonus, support_notes=support_notes
         )
@@ -2043,13 +2119,17 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         fhc_count_available = st.number_input("FHCs available", min_value=0, value=int(goal.fhc_count_available), step=1)
         fhc_effective_energy = st.number_input("Effective energy per FHC", min_value=0, value=int(goal.fhc_effective_energy), step=10)
 
-    e7, e8, e9 = st.columns(3)
+    e7, e8, e9, e10 = st.columns(4)
     with e7:
         can_count_available = st.number_input("Energy cans available", min_value=0, value=int(goal.can_count_available), step=1)
     with e8:
         can_energy_per_can = st.number_input("Effective energy per can", min_value=0, value=int(goal.can_energy_per_can), step=5)
     with e9:
         can_cooldown_hours = st.number_input("Booster cooldown per can (hours)", min_value=0.0, value=float(goal.can_cooldown_hours), step=0.5)
+    with e10:
+        fhc_cooldown_hours = st.number_input("Booster cooldown per FHC (hours)", min_value=0.0, value=float(goal.fhc_cooldown_hours), step=0.5)
+
+    max_daily_booster_cooldown_hours = st.number_input("Max booster cooldown window (hours)", min_value=0.0, value=float(goal.max_daily_booster_cooldown_hours), step=1.0, help="Planner cap for total booster-use spacing over a rolling day. For your current setup this should be 24 hours.")
 
     return GoalSettings(
         target_total_stats=float(target_total),
@@ -2089,6 +2169,8 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         can_count_available=int(can_count_available),
         can_energy_per_can=int(can_energy_per_can),
         can_cooldown_hours=float(can_cooldown_hours),
+        fhc_cooldown_hours=float(fhc_cooldown_hours),
+        max_daily_booster_cooldown_hours=float(max_daily_booster_cooldown_hours),
         today_energy_loss_adjustment=int(today_energy_loss_adjustment),
         forecast_energy_loss_per_day=int(forecast_energy_loss_per_day),
     )
@@ -2199,6 +2281,7 @@ def render_support_status(goal: GoalSettings) -> None:
     c4.metric("Support E until target", f"{total_support_energy:,}")
     st.caption(f"10★ company activation date used by planner: {activation_date.isoformat()}. Average support energy available per day until target: {avg_support_per_day:,} E.")
     st.caption(f"MCS ready now: {goal.mcs_ready_claims_now} claim(s). Next MCS ready: {fmt_local(mcs_next_ready_local(goal))}.")
+    st.caption(f"Booster planning cap: {goal.max_daily_booster_cooldown_hours:.0f}h total, {goal.can_cooldown_hours:.1f}h per can, {goal.fhc_cooldown_hours:.1f}h per FHC.")
     if goal.today_energy_loss_adjustment or goal.forecast_energy_loss_per_day:
         st.caption(f"Loss adjustments: today {goal.today_energy_loss_adjustment:,} E, forecast {goal.forecast_energy_loss_per_day:,} E/day.")
 
@@ -2436,29 +2519,64 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
     # Extra energy optimizer for today
     today_inventory = init_support_inventory(goal)
     required_extra_energy = estimate_required_extra_energy_for_day(state, ratio, goal, manual_mods, local_today())
-    bonus_energy, _support_notes, allocations = allocate_support_energy(goal, today_inventory, local_today(), required_extra_energy)
+    bonus_energy, _support_notes, allocations = allocate_support_energy(goal, today_inventory, local_today(), required_extra_energy, booster_cd_minutes=state.recovery.booster_cd_minutes)
     if bonus_energy > 0:
         actions.append(JumpStep(now_dt, "Optimizer target", f"To stay closer to your goal date, the planner wants about {bonus_energy} extra energy today from support sources."))
         cursor = max(now_dt + timedelta(minutes=15), now_dt)
         booster_ready = now_dt + timedelta(minutes=max(0, state.recovery.booster_cd_minutes))
-        for source_name, units, energy_added in allocations:
-            if source_name == "MCS stock energy":
+        fhc_units = 0
+        can_units = 0
+        for source_name, units, _energy_added in allocations:
+            if source_name == "FHC":
+                fhc_units = units
+            elif source_name == "Energy can":
+                can_units = units
+            elif source_name == "MCS stock energy":
                 when = now_dt if goal.mcs_ready_claims_now > 0 else mcs_next_ready_local(goal)
-                actions.append(JumpStep(when, "Claim MCS stock energy", f"Claim {units} MCS stock energy reward(s) for {energy_added} energy, then train it in {gym.name}."))
+                actions.append(JumpStep(when, "Claim MCS stock energy", f"Claim {units} MCS stock energy reward(s) for {units * goal.mcs_energy_per_claim} energy, then train it in {gym.name}."))
             elif source_name == "Job points":
                 activation = datetime.combine(company_10_star_activation_date(goal), dtime(hour=9, minute=0)).replace(tzinfo=APP_TIMEZONE)
                 when = max(now_dt, activation)
-                actions.append(JumpStep(when, "Spend job points for energy", f"Use {units} job points from your 10★ Game Shop for {energy_added} energy, then train it in {gym.name}."))
-            elif source_name == "FHC":
-                when = max(cursor, now_dt + timedelta(minutes=20))
-                actions.append(JumpStep(when, "Use FHC", f"Use {units} FHC(s) for about {energy_added} extra energy, ideally after your current energy/refill blocks are spent."))
-                cursor = when + timedelta(minutes=10)
-            elif source_name == "Energy can":
-                can_time = max(cursor, booster_ready)
-                for can_idx in range(units):
-                    actions.append(JumpStep(can_time, f"Use energy can #{can_idx + 1}", f"Use a can for about {goal.can_energy_per_can} energy, then train it in {gym.name}."))
-                    can_time = can_time + timedelta(hours=max(0.0, float(goal.can_cooldown_hours)))
-                cursor = can_time
+                actions.append(JumpStep(when, "Spend job points for energy", f"Use {units} job points from your 10★ Game Shop for {units * goal.job_energy_per_point} energy, then train it in {gym.name}."))
+
+        if fhc_units > 0 or can_units > 0:
+            fhc_cd = timedelta(hours=max(0.0, float(goal.fhc_cooldown_hours)))
+            can_cd = timedelta(hours=max(0.0, float(goal.can_cooldown_hours)))
+            available_minutes = booster_daily_capacity_minutes(goal, state.recovery.booster_cd_minutes)
+            # Build the exact booster sequence within the daily cooldown cap.
+            remaining_fhc = fhc_units
+            remaining_can = can_units
+            sequence: List[str] = []
+            while remaining_fhc > 0 or remaining_can > 0:
+                next_type = None
+                if remaining_fhc > 0 and remaining_can > 0:
+                    fhc_rate = goal.fhc_effective_energy / max(0.1, float(goal.fhc_cooldown_hours))
+                    can_rate = goal.can_energy_per_can / max(0.1, float(goal.can_cooldown_hours))
+                    next_type = "FHC" if fhc_rate <= can_rate else "Energy can"
+                elif remaining_fhc > 0:
+                    next_type = "FHC"
+                else:
+                    next_type = "Energy can"
+                sequence.append(next_type)
+                if next_type == "FHC":
+                    remaining_fhc -= 1
+                else:
+                    remaining_can -= 1
+            # Highest cooldown item should be the last use because its cooldown is effectively free in the 24h window.
+            sequence.sort(key=lambda s: float(goal.fhc_cooldown_hours) if s == "FHC" else float(goal.can_cooldown_hours))
+            booster_time = booster_ready
+            for idx, source_name in enumerate(sequence):
+                if source_name == "FHC":
+                    actions.append(JumpStep(booster_time, f"Use FHC #{sum(1 for s in sequence[:idx+1] if s == 'FHC')}", f"Use one FHC for about {goal.fhc_effective_energy} energy, then train it in {gym.name}."))
+                    if idx < len(sequence) - 1:
+                        booster_time = booster_time + fhc_cd
+                else:
+                    actions.append(JumpStep(booster_time, f"Use energy can #{sum(1 for s in sequence[:idx+1] if s == 'Energy can')}", f"Use one can for about {goal.can_energy_per_can} energy, then train it in {gym.name}."))
+                    if idx < len(sequence) - 1:
+                        booster_time = booster_time + can_cd
+            max_booster_energy = fhc_units * int(goal.fhc_effective_energy) + can_units * int(goal.can_energy_per_can)
+            if required_extra_energy > bonus_energy:
+                actions.append(JumpStep(now_dt, "Booster cap reached", f"Your daily booster limit only allows about {max_booster_energy} energy from FHC/cans in the next {goal.max_daily_booster_cooldown_hours:.0f} hours, so the optimizer cannot reach the full extra-energy target today."))
 
     if goal.today_energy_loss_adjustment > 0:
         actions.append(JumpStep(now_dt, "Energy loss adjustment", f"Planner is subtracting {goal.today_energy_loss_adjustment} energy today to account for overdoses or missed usage."))
