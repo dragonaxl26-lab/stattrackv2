@@ -2987,6 +2987,65 @@ def inject_torn_theme() -> None:
             min-height: 156px;
             margin-bottom: 0.65rem;
         }
+        .calendar-detail-shell {
+            margin-top: 0.55rem;
+            padding: 0.75rem;
+            border-radius: 14px;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(8,12,18,0.86);
+        }
+        .calendar-detail-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #f2f5ff;
+            margin-bottom: 0.45rem;
+        }
+        .calendar-detail-meta {
+            font-size: 0.78rem;
+            color: #c9d3e3;
+            margin-bottom: 0.2rem;
+        }
+        .calendar-step {
+            display: flex;
+            gap: 0.55rem;
+            align-items: flex-start;
+            margin-top: 0.45rem;
+            padding: 0.55rem;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .calendar-step-index {
+            min-width: 1.45rem;
+            height: 1.45rem;
+            border-radius: 999px;
+            background: rgba(188, 26, 61, 0.22);
+            color: #ffd9e2;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+        .calendar-step-body {
+            min-width: 0;
+        }
+        .calendar-step-when {
+            font-size: 0.72rem;
+            color: #8ea4bf;
+            margin-bottom: 0.12rem;
+        }
+        .calendar-step-action {
+            font-size: 0.8rem;
+            color: #f4f6fb;
+            font-weight: 700;
+            margin-bottom: 0.15rem;
+        }
+        .calendar-step-details {
+            font-size: 0.73rem;
+            color: #c5cede;
+            line-height: 1.35;
+        }
         .calendar-date {
             font-weight: 800;
             color: #ffffff;
@@ -3066,7 +3125,7 @@ def _calendar_day_html(item: DailyInstruction, today: date) -> str:
 
 def render_calendar_tab(plan: List[DailyInstruction], state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     st.subheader("Training calendar")
-    st.caption("Click a day card to open that day’s minute-by-minute action plan.")
+    st.caption("Open a day to expand its timed action plan directly inside the calendar.")
     if not plan:
         st.info("No calendar data available yet.")
         return
@@ -3080,6 +3139,15 @@ def render_calendar_tab(plan: List[DailyInstruction], state: PlayerState, ratio:
     last_day = plan[-1].plan_date
     grid_start = first_day - timedelta(days=first_day.weekday())
     grid_end = last_day + timedelta(days=(6 - last_day.weekday()))
+
+    selected_day: Optional[date] = None
+    selected_day_str = st.session_state.selected_calendar_date
+    if selected_day_str:
+        try:
+            selected_day = date.fromisoformat(selected_day_str)
+        except ValueError:
+            selected_day = None
+            st.session_state.selected_calendar_date = None
 
     header_cols = st.columns(7)
     for col, label in zip(header_cols, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
@@ -3097,39 +3165,45 @@ def render_calendar_tab(plan: List[DailyInstruction], state: PlayerState, ratio:
                     st.markdown('<div class="calendar-empty"></div>', unsafe_allow_html=True)
                 else:
                     st.markdown(_calendar_day_html(item, today), unsafe_allow_html=True)
-                    if st.button("Open day", key=f"cal_open_{day.isoformat()}", use_container_width=True):
-                        st.session_state.selected_calendar_date = day.isoformat()
+                    is_selected = day == selected_day
+                    button_label = "Hide day" if is_selected else "Open day"
+                    if st.button(button_label, key=f"cal_open_{day.isoformat()}", use_container_width=True):
+                        if is_selected:
+                            st.session_state.selected_calendar_date = None
+                            st.rerun()
+                        else:
+                            st.session_state.selected_calendar_date = day.isoformat()
+                            st.rerun()
+
+                    if is_selected:
+                        steps = build_action_plan_for_date(state, ratio, goal, manual_mods, day, item)
+                        st.markdown(
+                            f"""
+                            <div class="calendar-detail-shell">
+                                <div class="calendar-detail-title">{day.strftime('%a, %b %d')} plan</div>
+                                <div class="calendar-detail-meta"><strong>Type:</strong> {item.day_type.replace('_', ' ').title()}</div>
+                                <div class="calendar-detail-meta"><strong>Gym:</strong> {item.gym_name}</div>
+                                <div class="calendar-detail-meta"><strong>Train:</strong> {item.target_stat.title() if item.target_stat != 'none' else 'None'}</div>
+                                <div class="calendar-detail-meta"><strong>Planned energy:</strong> {item.estimated_energy:,}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        for idx, step in enumerate(sorted(steps, key=lambda x: x.when), start=1):
+                            st.markdown(
+                                f"""
+                                <div class="calendar-step">
+                                    <div class="calendar-step-index">{idx}</div>
+                                    <div class="calendar-step-body">
+                                        <div class="calendar-step-when">{fmt_local(step.when)}</div>
+                                        <div class="calendar-step-action">{step.action}</div>
+                                        <div class="calendar-step-details">{step.details}</div>
+                                    </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
         cursor += timedelta(days=7)
-
-    selected_day_str = st.session_state.selected_calendar_date or plan[0].plan_date.isoformat()
-    try:
-        selected_day = date.fromisoformat(selected_day_str)
-    except ValueError:
-        selected_day = plan[0].plan_date
-        st.session_state.selected_calendar_date = selected_day.isoformat()
-
-    selected_instruction = plan_map.get(selected_day)
-    st.markdown("---")
-    if selected_instruction is None:
-        st.info("Select a day in the calendar to see its action plan.")
-        return
-
-    st.subheader(f"Day details — {selected_day.strftime('%a, %b %d')}")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Day type", selected_instruction.day_type.replace('_', ' ').title())
-    c2.metric("Gym", selected_instruction.gym_name)
-    c3.metric("Train", selected_instruction.target_stat.title() if selected_instruction.target_stat != 'none' else 'None')
-    c4.metric("Planned energy", f"{selected_instruction.estimated_energy:,}")
-    steps = build_action_plan_for_date(state, ratio, goal, manual_mods, selected_day, selected_instruction)
-    rows = []
-    for idx, step in enumerate(sorted(steps, key=lambda x: x.when), start=1):
-        rows.append({
-            "Step": idx,
-            "When": fmt_local(step.when),
-            "Action": step.action,
-            "Details": step.details,
-        })
-    st.dataframe(rows, use_container_width=True)
 
 def render_setup_tab() -> TrainingModifiers:
     st.subheader("Planner setup")
