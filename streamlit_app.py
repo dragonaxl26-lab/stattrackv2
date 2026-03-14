@@ -46,6 +46,8 @@ TORN_API_TIMEOUT_SECONDS = 20
 TORN_API_COMMENT = "torn-stat-tracker-v2"
 APP_TIMEZONE = ZoneInfo("America/Chicago")
 APP_TIMEZONE_LABEL = "America/Chicago (Central Time)"
+TORN_TIMEZONE = ZoneInfo("UTC")
+TORN_TIMEZONE_LABEL = "TST (UTC)"
 
 
 def local_now() -> datetime:
@@ -56,12 +58,58 @@ def local_today() -> date:
     return local_now().date()
 
 
-def fmt_local(dt: datetime) -> str:
+def to_local(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=APP_TIMEZONE)
-    else:
-        dt = dt.astimezone(APP_TIMEZONE)
-    return dt.strftime("%Y-%m-%d %H:%M %Z")
+    return dt.astimezone(APP_TIMEZONE)
+
+
+def to_tst(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=APP_TIMEZONE)
+    return dt.astimezone(TORN_TIMEZONE)
+
+
+def fmt_local(dt: datetime) -> str:
+    return to_local(dt).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def fmt_tst(dt: datetime) -> str:
+    return to_tst(dt).strftime("%Y-%m-%d %H:%M TST")
+
+
+def ct_vs_tst_text(now_dt: Optional[datetime] = None) -> str:
+    now_dt = to_local(now_dt or local_now())
+    offset = now_dt.utcoffset() or timedelta(0)
+    if offset < timedelta(0):
+        delta = -offset
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+        if minutes:
+            return f"CT is {hours}h {minutes}m behind TST right now"
+        return f"CT is {hours}h behind TST right now"
+    if offset > timedelta(0):
+        delta = offset
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+        if minutes:
+            return f"CT is {hours}h {minutes}m ahead of TST right now"
+        return f"CT is {hours}h ahead of TST right now"
+    return "CT matches TST right now"
+
+
+def next_tst_midnight_local(now_dt: Optional[datetime] = None) -> datetime:
+    now_tst = to_tst(now_dt or local_now())
+    next_midnight_tst = datetime.combine(now_tst.date() + timedelta(days=1), dtime.min, tzinfo=TORN_TIMEZONE)
+    return next_midnight_tst.astimezone(APP_TIMEZONE)
+
+
+def next_daily_refill_ready_local(goal: "GoalSettings", now_dt: Optional[datetime] = None, after_dt: Optional[datetime] = None) -> datetime:
+    now_dt = to_local(now_dt or local_now())
+    after_dt = to_local(after_dt or now_dt)
+    if goal.daily_refill_available_now:
+        return max(after_dt, now_dt + timedelta(minutes=10))
+    return max(after_dt, next_tst_midnight_local(now_dt))
 
 
 @dataclass
@@ -219,6 +267,7 @@ class GoalSettings:
     jump_min_extra_gain_pct: float = 12.0
     jump_prep_hours: float = 30.0
     assumed_xanax_cooldown_hours: float = 8.0
+    daily_refill_available_now: bool = True
 
 
 @dataclass
@@ -864,8 +913,10 @@ def build_today_energy_blocks(state: PlayerState, goal: GoalSettings, mods: Trai
         blocks.append((now_dt, int(state.recovery.current_energy), 'current energy'))
 
     if state.recovery.daily_refill_enabled:
-        refill_time = now_dt + timedelta(minutes=10)
-        blocks.append((refill_time, int(state.recovery.refill_energy), 'daily refill'))
+        refill_time = next_daily_refill_ready_local(goal, now_dt, after_dt=now_dt + timedelta(minutes=10))
+        if refill_time.date() == now_dt.date():
+            refill_source = 'daily refill' if goal.daily_refill_available_now else 'daily refill reset (TST midnight)'
+            blocks.append((refill_time, int(state.recovery.refill_energy), refill_source))
 
     eod = end_of_day(now_dt)
     natural_e = natural_energy_between(state, mods, now_dt, eod)
@@ -1487,7 +1538,7 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     with c2:
         target_date = st.date_input("Target date", value=goal.target_date)
 
-    c3, c4, c5, c6 = st.columns(4)
+    c3, c4, c5, c6, c7a = st.columns(5)
     with c3:
         fhc_allowed = st.checkbox("FHC allowed", value=goal.fhc_allowed)
     with c4:
@@ -1496,8 +1547,12 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         auto_schedule_happy_jumps = st.checkbox("Auto-schedule happy jumps", value=goal.auto_schedule_happy_jumps)
     with c6:
         schedule_99k_jump = st.checkbox("Schedule 99k jump", value=goal.schedule_99k_jump)
+    with c7a:
+        daily_refill_available_now = st.checkbox("Daily refill available now", value=goal.daily_refill_available_now)
 
     skip_war_days = st.checkbox("Skip war days", value=goal.skip_war_days)
+    refill_reset_local = next_tst_midnight_local()
+    st.caption(f"App times are shown in Central Time. Torn resets use {TORN_TIMEZONE_LABEL}. {ct_vs_tst_text()}. Next TST midnight / refill reset: {fmt_local(refill_reset_local)} ({fmt_tst(refill_reset_local)}).")
 
     c7, c8, c9 = st.columns(3)
     with c7:
@@ -1560,6 +1615,7 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         jump_min_extra_gain_pct=float(jump_min_extra_gain_pct),
         jump_prep_hours=float(jump_prep_hours),
         assumed_xanax_cooldown_hours=float(assumed_xanax_cooldown_hours),
+        daily_refill_available_now=daily_refill_available_now,
     )
 
 
@@ -1692,6 +1748,9 @@ def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: 
     if state.last_sync is not None:
         st.caption(f"Last sync: {fmt_local(state.last_sync)}")
 
+    next_reset_local = next_tst_midnight_local()
+    st.caption(f"Times shown in Central Time. {ct_vs_tst_text()}. Next TST midnight / daily refill reset: {fmt_local(next_reset_local)} ({fmt_tst(next_reset_local)}).")
+
     if combined_mods.detected_sources:
         st.caption("Training modifiers in effect: " + "; ".join(combined_mods.detected_sources))
 
@@ -1803,9 +1862,15 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
         actions.append(JumpStep(now_dt, "Train current energy", f"Train your current {state.recovery.current_energy} energy into {target_stat.title()} at {gym.name}."))
 
     if state.recovery.daily_refill_enabled:
-        refill_dt = now_dt + timedelta(minutes=10)
-        actions.append(JumpStep(refill_dt, "Use daily refill", "Use your daily refill after your current energy block if you are training today."))
-        actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
+        refill_dt = next_daily_refill_ready_local(goal, now_dt, after_dt=now_dt + timedelta(minutes=10))
+        if goal.daily_refill_available_now:
+            actions.append(JumpStep(refill_dt, "Use daily refill", "Use your daily refill after your current energy block if you are training today."))
+            actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
+        else:
+            actions.append(JumpStep(refill_dt, "Daily refill resets (TST midnight)", f"Your daily refill resets at Torn midnight. That is {fmt_local(refill_dt)} in Central Time / {fmt_tst(refill_dt)} in Torn Standard Time."))
+            if refill_dt.date() == now_dt.date():
+                actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Use daily refill after reset", "Use your daily refill once the TST reset hits if you are still training today."))
+                actions.append(JumpStep(refill_dt + timedelta(minutes=2), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
 
     natural_e = natural_energy_between(state, combined_mods, now_dt, end_of_day(now_dt))
     if natural_e > 0:
