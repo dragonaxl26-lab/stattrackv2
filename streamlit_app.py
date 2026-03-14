@@ -256,6 +256,7 @@ class GoalSettings:
     schedule_99k_jump: bool = False
     scheduled_99k_jump_date: date = field(default_factory=lambda: local_today() + timedelta(days=7))
     scheduled_99k_jump_time: dtime = dtime(hour=0, minute=15)
+    manual_99k_jump_schedule_text: str = ""
     current_gym_energy_progress: int = 0
     skip_war_days: bool = True
     normal_day_start_happy: int = 5_000
@@ -1354,11 +1355,112 @@ def projected_start_happy_for_day(state: PlayerState, goal: GoalSettings, plan_d
     return goal.normal_day_start_happy
 
 
+
+def parse_manual_99k_schedule_text(schedule_text: str) -> List[datetime]:
+    entries: List[datetime] = []
+    seen: set[str] = set()
+    for raw_line in (schedule_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        normalized = line.replace("T", " ")
+        parsed: Optional[datetime] = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M"):
+            try:
+                parsed = datetime.strptime(normalized, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            continue
+        parsed = parsed.replace(tzinfo=APP_TIMEZONE)
+        key = parsed.isoformat()
+        if key not in seen:
+            seen.add(key)
+            entries.append(parsed)
+    return sorted(entries)
+
+
+def manual_99k_schedule_datetimes(goal: GoalSettings) -> List[datetime]:
+    parsed = parse_manual_99k_schedule_text(goal.manual_99k_jump_schedule_text)
+    if parsed:
+        return parsed
+    if goal.schedule_99k_jump:
+        fallback = datetime.combine(goal.scheduled_99k_jump_date, goal.scheduled_99k_jump_time).replace(tzinfo=APP_TIMEZONE)
+        return [fallback]
+    return []
+
+
 def selected_99k_execute_at(goal: GoalSettings) -> Optional[datetime]:
-    if not goal.schedule_99k_jump:
+    now_dt = local_now()
+    for dt in manual_99k_schedule_datetimes(goal):
+        if to_local(dt) >= now_dt:
+            return to_local(dt)
+    return None
+
+
+def scheduled_99k_execute_at_for_day(goal: GoalSettings, plan_day: date) -> Optional[datetime]:
+    for dt in manual_99k_schedule_datetimes(goal):
+        dt_local = to_local(dt)
+        if dt_local.date() == plan_day:
+            return dt_local
+    return None
+
+
+def build_specific_jump_plan(
+    state: PlayerState,
+    ratio: RatioProfile,
+    goal: GoalSettings,
+    mods: TrainingModifiers,
+    jump_type: str,
+    execute_at: datetime,
+    manual_selected: bool = False,
+) -> Optional[JumpPlan]:
+    target_stat = choose_target_stat(state.stats, ratio)
+    gym = best_gym_for_stat(state, target_stat)
+    if gym is None:
         return None
-    dt = datetime.combine(goal.scheduled_99k_jump_date, goal.scheduled_99k_jump_time)
-    return dt.replace(tzinfo=APP_TIMEZONE)
+
+    normal_energy = state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    normal_start_happy = max(state.recovery.max_happy, goal.normal_day_start_happy)
+    normal_sim = simulate_training_block(state.stats, target_stat, gym, normal_energy, normal_start_happy, mods)
+
+    jump_energy = goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
+    chosen_gain = 0.0
+    if jump_type == "happy_jump":
+        chosen_gain = float(simulate_training_block(state.stats, target_stat, gym, jump_energy, goal.happy_jump_start_happy, mods)["total_gain"])
+    else:
+        chosen_gain = float(simulate_training_block(state.stats, target_stat, gym, jump_energy, goal.super_happy_jump_start_happy, mods)["total_gain"])
+
+    prep_start = to_local(execute_at) - timedelta(hours=goal.jump_prep_hours)
+    xanax_times = planned_xanax_stack_times(state, goal, to_local(execute_at))
+    final_cd_clear = xanax_times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
+    notes: List[str] = []
+    if manual_selected and jump_type == "super_happy_jump":
+        notes.append("99k jump date/time was manually selected by you.")
+    if final_cd_clear > to_local(execute_at):
+        notes.append("Warning: current drug cooldown and stack timing push the final Xanax cooldown past the planned jump window.")
+    if state.recovery.booster_cd_minutes > 0 and local_now() + timedelta(minutes=state.recovery.booster_cd_minutes) > to_local(execute_at):
+        notes.append("Warning: booster cooldown is still active beyond the planned jump window.")
+    if to_local(execute_at).date() in state.faction_war_days and not goal.allow_jump_on_war_days:
+        notes.append("Warning: this planned jump falls on a war day.")
+    notes.extend([
+        f"Planner reserves about {goal.jump_prep_hours:.0f} hours of prep time for the jump.",
+        f"Planner assumes {goal.jump_stack_xanax_uses} Xanax with roughly {goal.assumed_xanax_cooldown_hours:.1f} hours between doses.",
+        "Use the jump just after a 15-minute happy reset mark.",
+        "Train immediately after applying happy items / ecstasy, then use daily refill.",
+    ])
+    return JumpPlan(
+        jump_type=jump_type,
+        target_stat=target_stat,
+        gym_name=gym.name,
+        prep_start=prep_start,
+        execute_at=to_local(execute_at),
+        projected_normal_gain=float(normal_sim["total_gain"]),
+        projected_jump_gain=chosen_gain,
+        projected_gain_delta=float(chosen_gain - normal_sim["total_gain"]),
+        notes=notes,
+    )
 
 
 def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> datetime:
@@ -1381,7 +1483,12 @@ def planned_xanax_stack_times(state: PlayerState, goal: GoalSettings, execute_at
     return times
 
 
+
 def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, mods: TrainingModifiers) -> Optional[JumpPlan]:
+    manual_99k_dt = selected_99k_execute_at(goal)
+    if manual_99k_dt is not None:
+        return build_specific_jump_plan(state, ratio, goal, mods, "super_happy_jump", manual_99k_dt, manual_selected=True)
+
     target_stat = choose_target_stat(state.stats, ratio)
     gym = best_gym_for_stat(state, target_stat)
     if gym is None:
@@ -1393,56 +1500,12 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
 
     jump_energy = goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
     happy_sim = simulate_training_block(state.stats, target_stat, gym, jump_energy, goal.happy_jump_start_happy, mods)
-    super_sim = simulate_training_block(state.stats, target_stat, gym, jump_energy, goal.super_happy_jump_start_happy, mods)
     threshold = 1 + goal.jump_min_extra_gain_pct / 100.0
 
-    execute_at: Optional[datetime] = None
-    chosen_type: Optional[str] = None
-    chosen_gain = 0.0
-    notes: List[str] = []
-
-    manual_99k_dt = selected_99k_execute_at(goal)
-    if manual_99k_dt is not None:
-        chosen_type = "super_happy_jump"
-        chosen_gain = float(super_sim["total_gain"])
-        execute_at = manual_99k_dt
-        notes.append("99k jump date was manually selected by you.")
-    elif goal.auto_schedule_happy_jumps and happy_sim["total_gain"] > normal_sim["total_gain"] * threshold:
-        chosen_type = "happy_jump"
-        chosen_gain = float(happy_sim["total_gain"])
+    if goal.auto_schedule_happy_jumps and happy_sim["total_gain"] > normal_sim["total_gain"] * threshold:
         execute_at = next_viable_happy_jump_window(state, goal)
-
-    if chosen_type is None or execute_at is None:
-        return None
-
-    prep_start = execute_at - timedelta(hours=goal.jump_prep_hours)
-    xanax_times = planned_xanax_stack_times(state, goal, execute_at)
-    final_cd_clear = xanax_times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
-    if final_cd_clear > execute_at:
-        notes.append("Warning: current drug cooldown and stack timing push the final Xanax cooldown past the planned jump window.")
-    if state.recovery.booster_cd_minutes > 0 and local_now() + timedelta(minutes=state.recovery.booster_cd_minutes) > execute_at:
-        notes.append("Warning: booster cooldown is still active beyond the planned jump window.")
-    if execute_at.date() in state.faction_war_days and not goal.allow_jump_on_war_days:
-        notes.append("Warning: this planned jump falls on a war day.")
-
-    notes.extend([
-        f"Planner reserves about {goal.jump_prep_hours:.0f} hours of prep time for the jump.",
-        f"Planner assumes {goal.jump_stack_xanax_uses} Xanax with roughly {goal.assumed_xanax_cooldown_hours:.1f} hours between doses.",
-        "Use the jump just after a 15-minute happy reset mark.",
-        "Train immediately after applying happy items / ecstasy, then use daily refill.",
-    ])
-
-    return JumpPlan(
-        jump_type=chosen_type,
-        target_stat=target_stat,
-        gym_name=gym.name,
-        prep_start=prep_start,
-        execute_at=execute_at,
-        projected_normal_gain=float(normal_sim["total_gain"]),
-        projected_jump_gain=chosen_gain,
-        projected_gain_delta=float(chosen_gain - normal_sim["total_gain"]),
-        notes=notes,
-    )
+        return build_specific_jump_plan(state, ratio, goal, mods, "happy_jump", execute_at, manual_selected=False)
+    return None
 
 
 def build_jump_sequence(state: PlayerState, goal: GoalSettings, jump_plan: JumpPlan) -> List[JumpStep]:
@@ -1481,7 +1544,14 @@ def build_jump_sequence(state: PlayerState, goal: GoalSettings, jump_plan: JumpP
     return sorted(steps, key=lambda x: x.when)
 
 
+
 def day_type_for_date(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, on_day: date, mods: TrainingModifiers) -> Tuple[str, Optional[JumpPlan]]:
+    manual_99k_dt = scheduled_99k_execute_at_for_day(goal, on_day)
+    if manual_99k_dt is not None:
+        jump_plan = build_specific_jump_plan(state, ratio, goal, mods, "super_happy_jump", manual_99k_dt, manual_selected=True)
+        if jump_plan is not None:
+            return "super_happy_jump", jump_plan
+
     jump_plan = build_jump_plan(state, ratio, goal, mods)
     if jump_plan is not None:
         if on_day == jump_plan.execute_at.date():
@@ -1586,6 +1656,7 @@ def build_plan_preview(state: PlayerState, ratio: RatioProfile, goal: GoalSettin
     return plan
 
 
+
 def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods: TrainingModifiers) -> Optional[int]:
     remaining = goal.target_total_stats - state.stats.total()
     if remaining <= 0:
@@ -1602,13 +1673,19 @@ def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods
     sim = simulate_training_block(state.stats, target_stat, gym, baseline_energy, start_happy, combined_mods)
     est_daily_gain = float(sim["total_gain"])
 
-    jump_plan = build_jump_plan(state, RatioProfile(), goal, combined_mods)
-    if jump_plan is not None:
-        est_daily_gain += max(0.0, jump_plan.projected_gain_delta) / 7.0
+    target_days = max(1, (goal.target_date - local_today()).days)
+    manual_99k_dts = [dt for dt in manual_99k_schedule_datetimes(goal) if local_today() <= to_local(dt).date() <= goal.target_date]
+    if manual_99k_dts:
+        jump_plan = build_specific_jump_plan(state, RatioProfile(), goal, combined_mods, "super_happy_jump", manual_99k_dts[0], manual_selected=True)
+        if jump_plan is not None:
+            est_daily_gain += max(0.0, jump_plan.projected_gain_delta) * len(manual_99k_dts) / target_days
+    else:
+        jump_plan = build_jump_plan(state, RatioProfile(), goal, combined_mods)
+        if jump_plan is not None:
+            est_daily_gain += max(0.0, jump_plan.projected_gain_delta) / 7.0
 
-    support_total_energy, support_avg_daily_energy = total_support_energy_available_until_target(goal)
-    gain_per_energy = est_daily_gain / max(1, baseline_energy)
-    est_daily_gain += support_avg_daily_energy * gain_per_energy
+    total_support_energy, avg_support_per_day = total_support_energy_available_until_target(goal)
+    est_daily_gain += max(0, avg_support_per_day) * (sim["total_gain"] / max(1, baseline_energy))
 
     if est_daily_gain <= 0:
         return None
@@ -1751,12 +1828,28 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
 
     scheduled_99k_jump_date = goal.scheduled_99k_jump_date
     scheduled_99k_jump_time = goal.scheduled_99k_jump_time
+    manual_99k_jump_schedule_text = goal.manual_99k_jump_schedule_text
     if schedule_99k_jump:
         c16, c17 = st.columns(2)
         with c16:
-            scheduled_99k_jump_date = st.date_input("Planned 99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
+            scheduled_99k_jump_date = st.date_input("Default 99k jump date", value=goal.scheduled_99k_jump_date, key="manual_99k_jump_date")
         with c17:
-            scheduled_99k_jump_time = st.time_input("Planned 99k jump time", value=goal.scheduled_99k_jump_time, step=timedelta(minutes=15))
+            scheduled_99k_jump_time = st.time_input("Default 99k jump time", value=goal.scheduled_99k_jump_time, step=timedelta(minutes=15))
+        fallback_line = f"{scheduled_99k_jump_date.isoformat()} {scheduled_99k_jump_time.strftime('%H:%M')}"
+        initial_text = goal.manual_99k_jump_schedule_text.strip() or fallback_line
+        manual_99k_jump_schedule_text = st.text_area(
+            "Manual 99k jump schedule (Central Time, one per line: YYYY-MM-DD HH:MM)",
+            value=initial_text,
+            height=120,
+            help="Schedule multiple exact 99k jumps here. Example:\n2026-03-20 00:15\n2026-04-05 00:15",
+        )
+        parsed_schedule = parse_manual_99k_schedule_text(manual_99k_jump_schedule_text)
+        if parsed_schedule:
+            st.caption(f"Scheduled 99k jumps loaded: {len(parsed_schedule)}")
+        else:
+            st.caption("No valid manual 99k jumps parsed yet. The fallback single date/time above will be used if you leave the box blank.")
+    else:
+        manual_99k_jump_schedule_text = ""
 
     current_gym_energy_progress = st.number_input(
         "Current estimated gym energy progress toward next unlock",
@@ -1811,6 +1904,7 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         schedule_99k_jump=schedule_99k_jump,
         scheduled_99k_jump_date=scheduled_99k_jump_date,
         scheduled_99k_jump_time=scheduled_99k_jump_time,
+        manual_99k_jump_schedule_text=manual_99k_jump_schedule_text,
         current_gym_energy_progress=int(current_gym_energy_progress),
         skip_war_days=skip_war_days,
         normal_day_start_happy=int(normal_day_start_happy),
@@ -2084,6 +2178,59 @@ def render_jump_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSetting
         st.write(f"- {note}")
 
 
+
+def estimate_optimal_99k_jump_count(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> Tuple[int, int, float]:
+    combined_mods = state.training_modifiers.merge(manual_mods)
+    target_days = max(0, (goal.target_date - local_today()).days)
+    if target_days <= 0:
+        return 0, 0, 0.0
+
+    baseline_goal = GoalSettings(**{**goal.__dict__, "schedule_99k_jump": False, "manual_99k_jump_schedule_text": ""})
+    baseline_days = days_until_goal_estimate(state, baseline_goal, manual_mods)
+    if baseline_days is None:
+        return 0, 0, 0.0
+
+    candidate_execute_at = local_now() + timedelta(hours=max(1.0, goal.jump_prep_hours))
+    candidate_execute_at = next_quarter_hour(candidate_execute_at)
+    per_jump_plan = build_specific_jump_plan(state, ratio, goal, combined_mods, "super_happy_jump", candidate_execute_at, manual_selected=True)
+    per_jump_delta = max(0.0, per_jump_plan.projected_gain_delta if per_jump_plan is not None else 0.0)
+
+    max_slots = max(0, int(((goal.target_date - local_today()).days * 24) // max(1.0, goal.jump_prep_hours)))
+    if baseline_days <= target_days or per_jump_delta <= 0:
+        return 0, max_slots, per_jump_delta
+
+    remaining = max(0.0, goal.target_total_stats - state.stats.total())
+    avg_gain_without_manual = remaining / max(1, baseline_days)
+    shortfall_stats = max(0.0, remaining - (avg_gain_without_manual * target_days))
+    recommended = math.ceil(shortfall_stats / per_jump_delta) if per_jump_delta > 0 else 0
+    recommended = max(0, min(recommended, max_slots))
+    return recommended, max_slots, per_jump_delta
+
+
+def render_99k_optimizer_panel(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    st.subheader("99k jump optimizer")
+    scheduled = manual_99k_schedule_datetimes(goal)
+    recommended, max_slots, per_jump_delta = estimate_optimal_99k_jump_count(state, ratio, goal, manual_mods)
+    scheduled_until_target = [dt for dt in scheduled if local_today() <= to_local(dt).date() <= goal.target_date]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Recommended 99k jumps", recommended)
+    c2.metric("Currently scheduled", len(scheduled_until_target))
+    c3.metric("Max feasible slots", max_slots)
+
+    if per_jump_delta > 0:
+        st.caption(f"Current estimated extra gain per 99k jump: {per_jump_delta:,.2f}")
+    if scheduled_until_target:
+        st.caption("Scheduled 99k jumps: " + ", ".join(fmt_local(dt) for dt in scheduled_until_target[:8]) + (" ..." if len(scheduled_until_target) > 8 else ""))
+
+    if len(scheduled_until_target) < recommended:
+        st.warning(f"You are currently short {recommended - len(scheduled_until_target)} manual 99k jump(s) versus the optimizer's current estimate.")
+    elif len(scheduled_until_target) > recommended and recommended >= 0:
+        st.info("You have at least as many manual 99k jumps scheduled as the optimizer currently recommends.")
+    else:
+        st.success("Your currently scheduled 99k jumps match the optimizer's current estimate.")
+
+
 def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> List[JumpStep]:
     combined_mods = state.training_modifiers.merge(manual_mods)
     today_type, jump_plan = day_type_for_date(state, ratio, goal, local_today(), combined_mods)
@@ -2336,6 +2483,7 @@ def main() -> None:
     render_war_calendar_editor(player_state)
     render_today_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
     render_jump_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+    render_99k_optimizer_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
     render_daily_planner_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
     render_jump_sequence_panel(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
 
