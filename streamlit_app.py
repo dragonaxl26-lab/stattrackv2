@@ -14,6 +14,7 @@ import hashlib
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # ============================================================
@@ -132,6 +133,16 @@ def _current_persistence_payload() -> Dict[str, Any]:
         "preview_days": st.session_state.get("preview_days", 30),
         "display_timezone_name": st.session_state.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME),
         "use_tct_times": st.session_state.get("use_tct_times", False),
+        "notifications_enabled": st.session_state.get("notifications_enabled", True),
+        "notification_toasts_enabled": st.session_state.get("notification_toasts_enabled", True),
+        "notification_browser_enabled": st.session_state.get("notification_browser_enabled", False),
+        "notification_lead_minutes": st.session_state.get("notification_lead_minutes", 10),
+        "notify_refill_ready": st.session_state.get("notify_refill_ready", True),
+        "notify_drug_clear": st.session_state.get("notify_drug_clear", True),
+        "notify_booster_clear": st.session_state.get("notify_booster_clear", True),
+        "notify_jump_prep": st.session_state.get("notify_jump_prep", True),
+        "notify_jump_execute": st.session_state.get("notify_jump_execute", True),
+        "notify_gym_unlock": st.session_state.get("notify_gym_unlock", True),
     }
 
 
@@ -167,6 +178,17 @@ def reset_runtime_state(keep_api_fields: bool = True) -> None:
     st.session_state.preview_days = 30
     st.session_state.display_timezone_name = DEFAULT_APP_TIMEZONE_NAME
     st.session_state.use_tct_times = False
+    st.session_state.notifications_enabled = True
+    st.session_state.notification_toasts_enabled = True
+    st.session_state.notification_browser_enabled = False
+    st.session_state.notification_lead_minutes = 10
+    st.session_state.notify_refill_ready = True
+    st.session_state.notify_drug_clear = True
+    st.session_state.notify_booster_clear = True
+    st.session_state.notify_jump_prep = True
+    st.session_state.notify_jump_execute = True
+    st.session_state.notify_gym_unlock = True
+    st.session_state._notified_events = []
     st.session_state._persistence_error = None
     if keep_api_fields:
         st.session_state._loaded_persistence_namespace = loaded_namespace
@@ -188,6 +210,16 @@ def _apply_persistent_payload(payload: Dict[str, Any]) -> None:
     st.session_state.preview_days = int(payload.get("preview_days", 30))
     st.session_state.display_timezone_name = payload.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME)
     st.session_state.use_tct_times = bool(payload.get("use_tct_times", False))
+    st.session_state.notifications_enabled = bool(payload.get("notifications_enabled", True))
+    st.session_state.notification_toasts_enabled = bool(payload.get("notification_toasts_enabled", True))
+    st.session_state.notification_browser_enabled = bool(payload.get("notification_browser_enabled", False))
+    st.session_state.notification_lead_minutes = int(payload.get("notification_lead_minutes", 10))
+    st.session_state.notify_refill_ready = bool(payload.get("notify_refill_ready", True))
+    st.session_state.notify_drug_clear = bool(payload.get("notify_drug_clear", True))
+    st.session_state.notify_booster_clear = bool(payload.get("notify_booster_clear", True))
+    st.session_state.notify_jump_prep = bool(payload.get("notify_jump_prep", True))
+    st.session_state.notify_jump_execute = bool(payload.get("notify_jump_execute", True))
+    st.session_state.notify_gym_unlock = bool(payload.get("notify_gym_unlock", True))
 
 
 def load_persistent_state_for_api(api_key: str) -> None:
@@ -312,6 +344,99 @@ def ct_vs_tst_text(now_dt: Optional[datetime] = None) -> str:
             return f"CT is {hours}h {minutes}m ahead of TST right now"
         return f"CT is {hours}h ahead of TST right now"
     return "CT matches TST right now"
+
+
+def browser_notify(title: str, body: str) -> None:
+    safe_title = json.dumps(title)
+    safe_body = json.dumps(body)
+    components.html(
+        f"""
+        <script>
+        const title = {safe_title};
+        const body = {safe_body};
+        const send = () => {{ try {{ new Notification(title, {{ body }}); }} catch (e) {{}} }};
+        if (window.Notification) {{
+            if (Notification.permission === 'granted') {{ send(); }}
+            else if (Notification.permission !== 'denied') {{ Notification.requestPermission().then(p => {{ if (p === 'granted') send(); }}); }}
+        }}
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _notification_seen(event_id: str) -> bool:
+    return event_id in set(st.session_state.get('_notified_events', []))
+
+
+def _mark_notification_seen(event_id: str) -> None:
+    seen = set(st.session_state.get('_notified_events', []))
+    seen.add(event_id)
+    st.session_state._notified_events = list(seen)
+
+
+def emit_notification(event_id: str, title: str, body: str) -> None:
+    if _notification_seen(event_id):
+        return
+    if bool(st.session_state.get('notification_toasts_enabled', True)):
+        st.toast(f"{title}: {body}")
+    if bool(st.session_state.get('notification_browser_enabled', False)):
+        browser_notify(title, body)
+    _mark_notification_seen(event_id)
+
+
+def maybe_notify_at(event_id: str, target_dt: Optional[datetime], title: str, body: str) -> None:
+    if target_dt is None or not bool(st.session_state.get('notifications_enabled', True)):
+        return
+    now_dt = local_now()
+    target_dt = to_local(target_dt)
+    lead = timedelta(minutes=int(st.session_state.get('notification_lead_minutes', 10)))
+    if target_dt - lead <= now_dt <= target_dt + timedelta(minutes=10):
+        emit_notification(event_id, title, body)
+
+
+def run_notification_checks(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    if not bool(st.session_state.get('notifications_enabled', True)):
+        return
+
+    now_dt = local_now()
+    if bool(st.session_state.get('notify_refill_ready', True)):
+        refill_dt = next_daily_refill_ready_local(goal, now_dt=now_dt)
+        maybe_notify_at(f"refill:{refill_dt.isoformat()}", refill_dt, 'Daily refill ready', f'Refill is available at {fmt_local(refill_dt)}')
+
+    if bool(st.session_state.get('notify_drug_clear', True)) and state.recovery.drug_cd_minutes > 0:
+        drug_dt = now_dt + timedelta(minutes=state.recovery.drug_cd_minutes)
+        maybe_notify_at(f"drug:{drug_dt.isoformat()}", drug_dt, 'Drug cooldown clear', f'Next Xanax window opens at {fmt_local(drug_dt)}')
+
+    if bool(st.session_state.get('notify_booster_clear', True)) and state.recovery.booster_cd_minutes > 0:
+        booster_dt = now_dt + timedelta(minutes=state.recovery.booster_cd_minutes)
+        maybe_notify_at(f"booster:{booster_dt.isoformat()}", booster_dt, 'Booster cooldown clear', f'Booster items are available at {fmt_local(booster_dt)}')
+
+    projection = estimate_next_gym_unlock(state, ratio, goal, manual_mods, days=90)
+    if bool(st.session_state.get('notify_gym_unlock', True)) and getattr(projection, 'estimated_unlock_at', None) is not None and projection.next_gym:
+        maybe_notify_at(
+            f"gymunlock:{projection.next_gym}:{projection.estimated_unlock_at.isoformat()}",
+            projection.estimated_unlock_at,
+            'Gym unlock reached',
+            f"{projection.next_gym} unlocks at {fmt_local(projection.estimated_unlock_at)}",
+        )
+
+    jump_plan = build_jump_plan(state, ratio, goal, state.training_modifiers.merge(manual_mods))
+    if jump_plan is not None:
+        if bool(st.session_state.get('notify_jump_prep', True)):
+            maybe_notify_at(
+                f"jumpprep:{jump_plan.execute_at.isoformat()}",
+                jump_plan.prep_start,
+                'Jump prep start',
+                f"Start preparing for your {jump_plan.jump_type.replace('_', ' ')} targeting {jump_plan.target_stat.title()} in {jump_plan.gym_name}",
+            )
+        if bool(st.session_state.get('notify_jump_execute', True)):
+            maybe_notify_at(
+                f"jumpexec:{jump_plan.execute_at.isoformat()}",
+                jump_plan.execute_at,
+                'Jump execute now',
+                f"Run your {jump_plan.jump_type.replace('_', ' ')} in {jump_plan.gym_name} and train {jump_plan.target_stat.title()} now",
+            )
 
 
 def next_tst_midnight_local(now_dt: Optional[datetime] = None) -> datetime:
@@ -2255,6 +2380,8 @@ def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods
 
 
 def init_state() -> None:
+    if "_notified_events" not in st.session_state:
+        st.session_state._notified_events = []
     if "player_state" not in st.session_state:
         st.session_state.player_state = None
     if "goal_settings" not in st.session_state:
@@ -2341,6 +2468,21 @@ def render_sidebar() -> Tuple[str, int]:
         st.sidebar.caption(f"Displayed times are using {TORN_TIMEZONE_LABEL}. Selected local timezone remains saved as {selected_timezone}.")
     else:
         st.sidebar.caption(f"Displayed times are using {get_app_timezone_label()}.")
+
+    st.sidebar.header("Notifications")
+    st.session_state.notifications_enabled = st.sidebar.checkbox("Enable notifications", value=bool(st.session_state.notifications_enabled))
+    st.session_state.notification_toasts_enabled = st.sidebar.checkbox("In-app toasts", value=bool(st.session_state.notification_toasts_enabled), disabled=not bool(st.session_state.notifications_enabled))
+    st.session_state.notification_browser_enabled = st.sidebar.checkbox("Browser notifications", value=bool(st.session_state.notification_browser_enabled), disabled=not bool(st.session_state.notifications_enabled), help="Works while the tab is open. Your browser may ask for permission the first time a notification fires.")
+    st.session_state.notification_lead_minutes = int(st.sidebar.number_input("Lead time (minutes)", min_value=0, max_value=240, value=int(st.session_state.notification_lead_minutes), step=5, disabled=not bool(st.session_state.notifications_enabled)))
+    cna, cnb = st.sidebar.columns(2)
+    with cna:
+        st.session_state.notify_refill_ready = st.checkbox("Refill", value=bool(st.session_state.notify_refill_ready), disabled=not bool(st.session_state.notifications_enabled))
+        st.session_state.notify_drug_clear = st.checkbox("Drug", value=bool(st.session_state.notify_drug_clear), disabled=not bool(st.session_state.notifications_enabled))
+        st.session_state.notify_booster_clear = st.checkbox("Booster", value=bool(st.session_state.notify_booster_clear), disabled=not bool(st.session_state.notifications_enabled))
+    with cnb:
+        st.session_state.notify_jump_prep = st.checkbox("Jump prep", value=bool(st.session_state.notify_jump_prep), disabled=not bool(st.session_state.notifications_enabled))
+        st.session_state.notify_jump_execute = st.checkbox("Jump execute", value=bool(st.session_state.notify_jump_execute), disabled=not bool(st.session_state.notifications_enabled))
+        st.session_state.notify_gym_unlock = st.checkbox("Gym unlock", value=bool(st.session_state.notify_gym_unlock), disabled=not bool(st.session_state.notifications_enabled))
 
     st.sidebar.header("Planner assumptions")
     st.sidebar.caption("These match the locked v2 rules.")
