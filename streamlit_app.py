@@ -387,6 +387,43 @@ BUILD_FAMILY_WEIGHTS = {
     "Goober Max": {"high": 42.86, "second": 28.57, "medium": 28.57, "low": 0.0},
 }
 
+SPECIALIST_TARGET_OPTIONS = [
+    "Auto from build",
+    "None",
+    "Balboas Gym",
+    "Frontline Fitness",
+    "Gym 3000",
+    "Mr. Isoyamas",
+    "Total Rebound",
+    "Elites",
+    "The Sports Science Lab",
+    "Fight Club",
+]
+
+
+def default_specialist_target(family: str, primary: str) -> str:
+    if family == "Balanced":
+        return "None"
+    if family == "Baldr":
+        return FRONTLINE_GYM_NAME if primary in {"strength", "speed"} else BALBOAS_GYM_NAME
+    if family == "Hank":
+        return BALBOAS_GYM_NAME if primary in {"strength", "speed"} else FRONTLINE_GYM_NAME
+    if family in {"Goober Min", "Goober Max"}:
+        return {
+            "strength": GYM3000_NAME,
+            "speed": ISOYAMAS_NAME,
+            "defense": TOTAL_REBOUND_NAME,
+            "dexterity": ELITES_NAME,
+        }.get(primary, "None")
+    return "None"
+
+
+def resolve_specialist_target(goal: "GoalSettings") -> str:
+    target = getattr(goal, "specialist_gym_target", "Auto from build")
+    if target == "Auto from build":
+        return default_specialist_target(getattr(goal, "ratio_family", "Custom"), getattr(goal, "ratio_primary_stat", "strength"))
+    return target
+
 
 def ratio_profile_from_build(family: str, primary: str, fallback: Optional[RatioProfile] = None) -> RatioProfile:
     family = family if family in BUILD_FAMILY_OPTIONS else "Custom"
@@ -570,6 +607,7 @@ class GoalSettings:
     ratio_primary_stat: str = "strength"
     ssl_combined_xanax_ecstasy_taken: int = 999
     fight_club_access: bool = False
+    specialist_gym_target: str = "Auto from build"
 
 
 @dataclass
@@ -2493,50 +2531,55 @@ def estimate_frontline_unlock(state: PlayerState, ratio: RatioProfile, goal: Goa
 
 
 def render_specialist_gyms_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
-    st.subheader("Specialist gyms")
-    st.caption("These gyms unlock off parent gyms plus a build requirement. The planner will auto-use them whenever their requirements are met.")
-    specialist_order = [BALBOAS_GYM_NAME, FRONTLINE_GYM_NAME, GYM3000_NAME, ISOYAMAS_NAME, TOTAL_REBOUND_NAME, ELITES_NAME, SSL_GYM_NAME, FIGHT_CLUB_NAME]
-    projections = [estimate_specialist_unlock(name, state, ratio, goal, manual_mods) for name in specialist_order]
-    for i in range(0, len(projections), 2):
-        cols = st.columns(2)
-        for col, projection in zip(cols, projections[i:i+2]):
-            with col:
-                st.markdown(f"### {projection.gym_name}")
-                st.caption(projection.requirement_text)
-                if projection.parent_gym:
-                    st.write(f"Parent gym: **{projection.parent_gym}**")
-                if not projection.parent_unlocked:
-                    st.info(f"Parent not unlocked yet.")
-                if projection.gym_name == SSL_GYM_NAME:
-                    used_total = int(getattr(goal, 'ssl_combined_xanax_ecstasy_taken', 999))
-                    st.write(f"Combined Xanax + Ecstasy taken: **{used_total:,} / 150**")
-                    st.progress(min(1.0, max(0.0, (150 - min(used_total, 150)) / 150.0)))
-                elif projection.gym_name == FIGHT_CLUB_NAME:
-                    st.write(f"Manual access flag: **{'On' if getattr(goal, 'fight_club_access', False) else 'Off'}**")
-                    st.progress(1.0 if getattr(goal, 'fight_club_access', False) else 0.0)
-                else:
-                    required_value = max(projection.required_value, 1.0)
-                    st.write(f"Current requirement value: **{projection.current_value:,.0f}**")
-                    st.write(f"Required value: **{required_value:,.0f}**")
-                    st.progress(min(1.0, projection.current_value / required_value))
-                    if projection.remaining_value > 0:
-                        st.caption(f"Remaining gap: {projection.remaining_value:,.0f}")
-                if projection.estimated_unlock_at is not None:
-                    unlock_at = to_local(projection.estimated_unlock_at)
-                    if unlock_at <= local_now() + timedelta(minutes=1):
-                        st.success("Available now in the planner.")
-                    else:
-                        st.success(f"Projected unlock: {fmt_local(unlock_at)}")
-                elif projection.gym_name in {SSL_GYM_NAME, FIGHT_CLUB_NAME}:
-                    st.info("No automatic date projection for this requirement. Update the manual setting when it changes.")
-                else:
-                    st.info("Unlock is beyond the current forecast window.")
+    st.subheader("Specialist gym progress")
+    resolved_target = resolve_specialist_target(goal)
+    configured_target = getattr(goal, "specialist_gym_target", "Auto from build")
+    if configured_target == "Auto from build":
+        st.caption(f"Showing the specialist gym implied by your current build: **{resolved_target}**.")
+    elif resolved_target == "None":
+        st.caption("No specialist gym target selected.")
+    else:
+        st.caption(f"Showing progress only for your selected specialist gym: **{resolved_target}**.")
+
+    if resolved_target == "None":
+        st.info("Pick a specialist gym target in Setup → Build structure to see its progress here.")
+        return
+
+    projection = estimate_specialist_unlock(resolved_target, state, ratio, goal, manual_mods)
+    st.markdown(f"### {projection.gym_name}")
+    st.caption(projection.requirement_text)
+    if projection.parent_gym:
+        st.write(f"Parent gym: **{projection.parent_gym}**")
+    if not projection.parent_unlocked:
+        st.info("Parent not unlocked yet.")
+    if projection.gym_name == SSL_GYM_NAME:
+        used_total = int(getattr(goal, 'ssl_combined_xanax_ecstasy_taken', 999))
+        st.write(f"Combined Xanax + Ecstasy taken: **{used_total:,} / 150**")
+        st.progress(min(1.0, max(0.0, (150 - min(used_total, 150)) / 150.0)))
+    elif projection.gym_name == FIGHT_CLUB_NAME:
+        st.write(f"Manual access flag: **{'On' if getattr(goal, 'fight_club_access', False) else 'Off'}**")
+        st.progress(1.0 if getattr(goal, 'fight_club_access', False) else 0.0)
+    else:
+        required_value = max(projection.required_value, 1.0)
+        st.write(f"Current requirement value: **{projection.current_value:,.0f}**")
+        st.write(f"Required value: **{required_value:,.0f}**")
+        st.progress(min(1.0, projection.current_value / required_value))
+        if projection.remaining_value > 0:
+            st.caption(f"Remaining gap: {projection.remaining_value:,.0f}")
+    if projection.estimated_unlock_at is not None:
+        unlock_at = to_local(projection.estimated_unlock_at)
+        if unlock_at <= local_now() + timedelta(minutes=1):
+            st.success("Available now in the planner.")
+        else:
+            st.success(f"Projected unlock: {fmt_local(unlock_at)}")
+    elif projection.gym_name in {SSL_GYM_NAME, FIGHT_CLUB_NAME}:
+        st.info("No automatic date projection for this requirement. Update the manual setting when it changes.")
+    else:
+        st.info("Unlock is beyond the current forecast window.")
 
 
 def render_frontline_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
     render_specialist_gyms_progress(state, ratio, goal, manual_mods)
-
-
 def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     st.subheader("Goal setup")
     c1, c2 = st.columns(2)
@@ -2743,6 +2786,18 @@ def render_ratio_controls(goal: GoalSettings, ratio: RatioProfile) -> Tuple[Goal
     st.caption(build_family_ratio_caption(family, primary))
     st.caption(build_family_specialist_summary(family, primary))
 
+    default_target = default_specialist_target(family, primary)
+    target_help = f"Auto from build currently points to: {default_target}. Choose a specific specialist gym if you only want to track progress toward that one."
+    current_target = getattr(goal, "specialist_gym_target", "Auto from build")
+    specialist_target = st.selectbox(
+        "Specialist gym target",
+        options=SPECIALIST_TARGET_OPTIONS,
+        index=SPECIALIST_TARGET_OPTIONS.index(current_target) if current_target in SPECIALIST_TARGET_OPTIONS else 0,
+        help=target_help,
+    )
+    resolved_target = default_target if specialist_target == "Auto from build" else specialist_target
+    st.caption(f"Current specialist target for the Gyms tab: **{resolved_target}**")
+
     display_ratio = ratio_profile_from_build(family, primary, ratio) if family != "Custom" else ratio
     disabled = family != "Custom"
     c1, c2, c3, c4 = st.columns(4)
@@ -2753,7 +2808,7 @@ def render_ratio_controls(goal: GoalSettings, ratio: RatioProfile) -> Tuple[Goal
     total = strength + speed + defense + dexterity
     if abs(total - 100.0) > 0.05:
         st.warning(f"Ratio totals {total:.2f}%. Ideally this should equal 100%.")
-    updated_goal = GoalSettings(**{**goal.__dict__, "ratio_family": family, "ratio_primary_stat": primary})
+    updated_goal = GoalSettings(**{**goal.__dict__, "ratio_family": family, "ratio_primary_stat": primary, "specialist_gym_target": specialist_target})
     updated_ratio = RatioProfile(strength=strength, speed=speed, defense=defense, dexterity=dexterity)
     return updated_goal, updated_ratio
 
