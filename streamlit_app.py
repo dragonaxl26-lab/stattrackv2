@@ -371,6 +371,65 @@ class RatioProfile:
         }
 
 
+BUILD_FAMILY_OPTIONS = ["Custom", "Balanced", "Baldr", "Hank", "Goober Min", "Goober Max"]
+PAIR_STAT_MAP = {"strength": "speed", "speed": "strength", "defense": "dexterity", "dexterity": "defense"}
+PAIR_GROUPS = {
+    "strength": ("strength", "speed"),
+    "speed": ("strength", "speed"),
+    "defense": ("defense", "dexterity"),
+    "dexterity": ("defense", "dexterity"),
+}
+BUILD_FAMILY_WEIGHTS = {
+    "Balanced": {"high": 25.0, "second": 25.0, "medium": 25.0, "low": 25.0},
+    "Baldr": {"high": 30.86, "second": 24.69, "medium": 22.22, "low": 22.22},
+    "Hank": {"high": 34.72, "second": 27.78, "medium": 27.78, "low": 9.72},
+    "Goober Min": {"high": 38.46, "second": 30.77, "medium": 30.77, "low": 0.0},
+    "Goober Max": {"high": 42.86, "second": 28.57, "medium": 28.57, "low": 0.0},
+}
+
+
+def ratio_profile_from_build(family: str, primary: str, fallback: Optional[RatioProfile] = None) -> RatioProfile:
+    family = family if family in BUILD_FAMILY_OPTIONS else "Custom"
+    primary = primary if primary in STAT_KEYS else "strength"
+    if family == "Custom":
+        return fallback or RatioProfile()
+    if family == "Balanced":
+        return RatioProfile(25.0, 25.0, 25.0, 25.0)
+
+    weights = BUILD_FAMILY_WEIGHTS[family]
+    paired = PAIR_STAT_MAP[primary]
+    other_group = [s for s in STAT_KEYS if s not in {primary, paired}]
+    values = {stat: weights["medium"] for stat in STAT_KEYS}
+    values[primary] = weights["high"]
+    values[paired] = weights["second"] if family == "Baldr" else weights["low"]
+    for stat in other_group:
+        values[stat] = weights["medium"]
+    return RatioProfile(**values)
+
+
+def build_family_specialist_summary(family: str, primary: str) -> str:
+    if family == "Balanced":
+        return "Balanced keeps all stats even, but does not aim to hold specialist gyms."
+    if family == "Baldr":
+        if primary in {"strength", "speed"}:
+            return "Baldr in the strength/speed family aims to hold Frontline Fitness plus the matching single-stat 50E gym while leaving defense/dexterity on George's."
+        return "Baldr in the defense/dexterity family aims to hold Balboas Gym plus the matching single-stat 50E gym while leaving strength/speed on George's."
+    if family == "Hank":
+        if primary in {"strength", "speed"}:
+            return "Hank uses Balboas plus the matching single-stat 50E gym; your paired offensive stat becomes the dump stat."
+        return "Hank uses Frontline plus the matching single-stat 50E gym; your paired defensive stat becomes the dump stat."
+    if family in {"Goober Min", "Goober Max"}:
+        return "Goober-style builds are extreme specialist-gym routes that push one stat very high, dump its paired stat, and keep the opposite pair in the middle."
+    return "Custom lets you set any ratio manually."
+
+
+def build_family_ratio_caption(family: str, primary: str) -> str:
+    if family == "Custom":
+        return "Custom ratio: edit the percentages directly."
+    ratio = ratio_profile_from_build(family, primary)
+    return f"{family} preset for {primary.title()}: Str {ratio.strength:.2f}% | Spd {ratio.speed:.2f}% | Def {ratio.defense:.2f}% | Dex {ratio.dexterity:.2f}%"
+
+
 @dataclass
 class RecoveryState:
     current_energy: int = 0
@@ -507,6 +566,10 @@ class GoalSettings:
     max_daily_booster_cooldown_hours: float = 24.0
     today_energy_loss_adjustment: int = 0
     forecast_energy_loss_per_day: int = 0
+    ratio_family: str = "Baldr"
+    ratio_primary_stat: str = "strength"
+    ssl_combined_xanax_ecstasy_taken: int = 999
+    fight_club_access: bool = False
 
 
 @dataclass
@@ -562,6 +625,7 @@ class SpecialistGymProjection:
     required_value: float
     remaining_value: float
     estimated_unlock_at: Optional[datetime]
+    requirement_text: str = ""
 
 
 @dataclass
@@ -782,7 +846,7 @@ def total_support_energy_available_until_target(goal: GoalSettings) -> Tuple[int
 def build_gym_db() -> List[Gym]:
     return [
         Gym("Premier Fitness", "light", 5, 10, 200, {"strength": 2.0, "speed": 2.0, "defense": 2.0, "dexterity": 2.0}),
-        Gym("Average Joes", "light", 5, 100, 500, {"strength": 2.4, "speed": 2.4, "defense": 2.7, "dexterity": 2.4}),
+        Gym("Average Joes", "light", 5, 100, 500, {"strength": 2.4, "speed": 2.4, "defense": 2.8, "dexterity": 2.4}),
         Gym("Woody's Workout", "light", 5, 250, 1_000, {"strength": 2.7, "speed": 3.2, "defense": 3.0, "dexterity": 2.7}),
         Gym("Beach Bods", "light", 5, 500, 2_000, {"strength": 3.2, "speed": 3.2, "defense": 3.2, "dexterity": 0.0}),
         Gym("Silver Gym", "light", 5, 1_000, 2_750, {"strength": 3.4, "speed": 3.6, "defense": 3.4, "dexterity": 3.2}),
@@ -801,20 +865,62 @@ def build_gym_db() -> List[Gym]:
         Gym("Gun Shop", "heavy", 10, 10_000_000, 36_610, {"strength": 6.5, "speed": 6.4, "defense": 6.2, "dexterity": 6.2}),
         Gym("Force Training", "heavy", 10, 15_000_000, 46_640, {"strength": 6.4, "speed": 6.5, "defense": 6.4, "dexterity": 6.8}),
         Gym("Cha Cha's", "heavy", 10, 20_000_000, 56_520, {"strength": 6.4, "speed": 6.4, "defense": 6.8, "dexterity": 7.0}),
-        Gym("Frontline Fitness", "specialist", 10, 50_000_000, None, {"strength": 7.5, "speed": 7.5, "defense": 0.0, "dexterity": 0.0}),
         Gym("Atlas", "heavy", 10, 30_000_000, 67_775, {"strength": 7.0, "speed": 6.4, "defense": 6.4, "dexterity": 6.5}),
         Gym("Last Round", "heavy", 10, 50_000_000, 84_535, {"strength": 6.8, "speed": 6.5, "defense": 7.0, "dexterity": 6.5}),
         Gym("The Edge", "heavy", 10, 75_000_000, 106_305, {"strength": 6.8, "speed": 7.0, "defense": 7.0, "dexterity": 6.8}),
         Gym("George's", "heavy", 10, 100_000_000, None, {"strength": 7.3, "speed": 7.3, "defense": 7.3, "dexterity": 7.3}),
+        Gym("Balboas Gym", "specialist", 25, 50_000_000, None, {"strength": 0.0, "speed": 0.0, "defense": 7.5, "dexterity": 7.5}),
+        Gym("Frontline Fitness", "specialist", 25, 50_000_000, None, {"strength": 7.5, "speed": 7.5, "defense": 0.0, "dexterity": 0.0}),
+        Gym("Gym 3000", "specialist", 50, 100_000_000, None, {"strength": 8.0, "speed": 0.0, "defense": 0.0, "dexterity": 0.0}),
+        Gym("Mr. Isoyamas", "specialist", 50, 100_000_000, None, {"strength": 0.0, "speed": 0.0, "defense": 8.0, "dexterity": 0.0}),
+        Gym("Total Rebound", "specialist", 50, 100_000_000, None, {"strength": 0.0, "speed": 8.0, "defense": 0.0, "dexterity": 0.0}),
+        Gym("Elites", "specialist", 50, 100_000_000, None, {"strength": 0.0, "speed": 0.0, "defense": 0.0, "dexterity": 8.0}),
+        Gym("The Sports Science Lab", "specialist", 25, 500_000_000, None, {"strength": 9.0, "speed": 9.0, "defense": 9.0, "dexterity": 9.0}),
+        Gym("Fight Club", "specialist", 10, 2_147_483_647, None, {"strength": 10.0, "speed": 10.0, "defense": 10.0, "dexterity": 10.0}),
     ]
 
 
 GYM_DB = build_gym_db()
 GYM_INDEX = {gym.name: gym for gym in GYM_DB}
+BALBOAS_GYM_NAME = "Balboas Gym"
 FRONTLINE_GYM_NAME = "Frontline Fitness"
-FRONTLINE_PARENT_GYM_NAME = "Cha Cha's"
+GYM3000_NAME = "Gym 3000"
+ISOYAMAS_NAME = "Mr. Isoyamas"
+TOTAL_REBOUND_NAME = "Total Rebound"
+ELITES_NAME = "Elites"
+SSL_GYM_NAME = "The Sports Science Lab"
+FIGHT_CLUB_NAME = "Fight Club"
 LINEAR_GYM_NAMES = [gym.name for gym in GYM_DB if gym.tier != "specialist"]
 SPECIALIST_GYM_NAMES = [gym.name for gym in GYM_DB if gym.tier == "specialist"]
+AUTO_SPECIALIST_GYM_NAMES = [
+    BALBOAS_GYM_NAME,
+    FRONTLINE_GYM_NAME,
+    GYM3000_NAME,
+    ISOYAMAS_NAME,
+    TOTAL_REBOUND_NAME,
+    ELITES_NAME,
+    SSL_GYM_NAME,
+]
+SPECIALIST_PARENT_MAP = {
+    BALBOAS_GYM_NAME: "Cha Cha's",
+    FRONTLINE_GYM_NAME: "Cha Cha's",
+    GYM3000_NAME: "George's",
+    ISOYAMAS_NAME: "George's",
+    TOTAL_REBOUND_NAME: "George's",
+    ELITES_NAME: "George's",
+    SSL_GYM_NAME: "Last Round",
+    FIGHT_CLUB_NAME: "George's",
+}
+SPECIALIST_REQUIREMENT_TEXT = {
+    BALBOAS_GYM_NAME: "Defense + Dexterity must be at least 25% higher than Strength + Speed.",
+    FRONTLINE_GYM_NAME: "Strength + Speed must be at least 25% higher than Dexterity + Defense.",
+    GYM3000_NAME: "Strength must be at least 25% higher than your second-highest stat.",
+    ISOYAMAS_NAME: "Defense must be at least 25% higher than your second-highest stat.",
+    TOTAL_REBOUND_NAME: "Speed must be at least 25% higher than your second-highest stat.",
+    ELITES_NAME: "Dexterity must be at least 25% higher than your second-highest stat.",
+    SSL_GYM_NAME: "Last Round must be unlocked and your lifetime Xanax + Ecstasy total must be 150 or less.",
+    FIGHT_CLUB_NAME: "Membership is invite-only and the unlock requirement is not publicly documented.",
+}
 
 
 def ordered_gym_names() -> List[str]:
@@ -825,31 +931,76 @@ def linear_gym_names() -> List[str]:
     return list(LINEAR_GYM_NAMES)
 
 
+def specialist_progress_snapshot(gym_name: str, stats: PlayerStats, goal: Optional[GoalSettings] = None) -> Tuple[float, float, float, bool]:
+    goal = goal or GoalSettings()
+    if gym_name == FRONTLINE_GYM_NAME:
+        current_value = stats.strength + stats.speed
+        required_value = max(0.0, 1.25 * (stats.dexterity + stats.defense))
+        remaining_value = max(0.0, required_value - current_value)
+        return current_value, required_value, remaining_value, current_value >= required_value and required_value > 0
+    if gym_name == BALBOAS_GYM_NAME:
+        current_value = stats.defense + stats.dexterity
+        required_value = max(0.0, 1.25 * (stats.strength + stats.speed))
+        remaining_value = max(0.0, required_value - current_value)
+        return current_value, required_value, remaining_value, current_value >= required_value and required_value > 0
+    if gym_name in {GYM3000_NAME, ISOYAMAS_NAME, TOTAL_REBOUND_NAME, ELITES_NAME}:
+        target_stat = {
+            GYM3000_NAME: "strength",
+            ISOYAMAS_NAME: "defense",
+            TOTAL_REBOUND_NAME: "speed",
+            ELITES_NAME: "dexterity",
+        }[gym_name]
+        ordered_values = sorted(stats.as_dict().items(), key=lambda kv: kv[1], reverse=True)
+        current_value = stats.get(target_stat)
+        second_highest = next((value for key, value in ordered_values if key != target_stat), 0.0)
+        required_value = max(0.0, 1.25 * second_highest)
+        remaining_value = max(0.0, required_value - current_value)
+        return current_value, required_value, remaining_value, current_value >= required_value and required_value > 0
+    if gym_name == SSL_GYM_NAME:
+        used_total = max(0, int(getattr(goal, "ssl_combined_xanax_ecstasy_taken", 999)))
+        current_value = max(0.0, float(150 - used_total))
+        required_value = 150.0
+        remaining_value = max(0.0, float(used_total - 150))
+        return current_value, required_value, remaining_value, used_total <= 150
+    if gym_name == FIGHT_CLUB_NAME:
+        enabled = bool(getattr(goal, "fight_club_access", False))
+        return float(1 if enabled else 0), 1.0, float(0 if enabled else 1), enabled
+    return 0.0, 1.0, 1.0, False
+
+
 def frontline_progress_values(stats: PlayerStats) -> Tuple[float, float, float]:
-    current_value = stats.strength + stats.speed
-    required_value = max(0.0, 1.25 * (stats.dexterity + stats.defense))
-    remaining_value = max(0.0, required_value - current_value)
+    current_value, required_value, remaining_value, _ = specialist_progress_snapshot(FRONTLINE_GYM_NAME, stats)
     return current_value, required_value, remaining_value
 
 
-def frontline_is_unlocked_for_stats(unlocked_names: List[str], stats: PlayerStats) -> bool:
-    if FRONTLINE_PARENT_GYM_NAME not in unlocked_names:
+def specialist_parent_unlocked(unlocked_names: List[str], gym_name: str) -> bool:
+    parent = SPECIALIST_PARENT_MAP.get(gym_name)
+    return True if not parent else parent in unlocked_names
+
+
+def specialist_is_available(unlocked_names: List[str], stats: PlayerStats, gym_name: str, goal: Optional[GoalSettings] = None) -> bool:
+    if not specialist_parent_unlocked(unlocked_names, gym_name):
         return False
-    current_value, required_value, _ = frontline_progress_values(stats)
-    return current_value >= required_value and required_value > 0
+    _current_value, _required_value, _remaining_value, met = specialist_progress_snapshot(gym_name, stats, goal)
+    return met
 
 
-def active_unlocked_names_for_stats(base_unlocked_names: List[str], stats: PlayerStats, highest_idx: Optional[int] = None) -> List[str]:
+def frontline_is_unlocked_for_stats(unlocked_names: List[str], stats: PlayerStats, goal: Optional[GoalSettings] = None) -> bool:
+    return specialist_is_available(unlocked_names, stats, FRONTLINE_GYM_NAME, goal)
+
+
+def active_unlocked_names_for_stats(base_unlocked_names: List[str], stats: PlayerStats, highest_idx: Optional[int] = None, goal: Optional[GoalSettings] = None) -> List[str]:
     if highest_idx is None:
         linear_names = [name for name in base_unlocked_names if name in LINEAR_GYM_NAMES]
     else:
         linear_names = unlocked_names_through_index(highest_idx)
     names = set(linear_names)
-    for specialist in SPECIALIST_GYM_NAMES:
-        if specialist in base_unlocked_names:
+    effective_goal = goal or (st.session_state.get("goal_settings") if getattr(st, "session_state", None) is not None else None)
+    for specialist in AUTO_SPECIALIST_GYM_NAMES:
+        if specialist_is_available(list(names), stats, specialist, effective_goal):
             names.add(specialist)
-    if frontline_is_unlocked_for_stats(list(names), stats):
-        names.add(FRONTLINE_GYM_NAME)
+    if effective_goal and bool(getattr(effective_goal, "fight_club_access", False)):
+        names.add(FIGHT_CLUB_NAME)
     return [name for name in ordered_gym_names() if name in names]
 
 
@@ -1471,7 +1622,7 @@ def simulate_day_with_unlocks(
     support_notes: Optional[List[str]] = None,
 ) -> Tuple[DailyInstruction, PlayerStats, int, int, Optional[datetime]]:
     combined_mods = state.training_modifiers.merge(manual_mods)
-    projected_unlocked = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_idx)
+    projected_unlocked = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_idx, goal)
     projected_state = PlayerState(
         stats=state.stats,
         recovery=state.recovery,
@@ -1514,7 +1665,7 @@ def simulate_day_with_unlocks(
         time_cursor = jump_plan.execute_at
 
     while energy_left > 0:
-        unlocked_names = active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx)
+        unlocked_names = active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx, goal)
         gym = best_gym_for_stat_from_names(unlocked_names, target_stat)
         if gym is None:
             break
@@ -1540,7 +1691,7 @@ def simulate_day_with_unlocks(
         current_happy = int(sim['ending_happy'])
         energy_left -= segment_energy
 
-        post_segment_names = active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx)
+        post_segment_names = active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx, goal)
         if FRONTLINE_GYM_NAME in post_segment_names and FRONTLINE_GYM_NAME not in unlocked_names:
             specialist_unlock_time = estimate_segment_end_time(time_cursor, segment_energy, day_energy)
             unlock_notes.append(f'Projected specialist unlock during day: {FRONTLINE_GYM_NAME} at about {specialist_unlock_time.strftime("%H:%M")}.')
@@ -1562,7 +1713,7 @@ def simulate_day_with_unlocks(
     notes = [
         f'Train {target_stat.title()} in {gym_name}.',
         f'Phase: {milestone_phase(current_stats)}.',
-        f'Expected happy loss per train: {expected_happy_loss_per_train((best_gym_for_stat_from_names(active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx), target_stat) or GYM_DB[0]).energy_cost, combined_mods)}.',
+        f'Expected happy loss per train: {expected_happy_loss_per_train((best_gym_for_stat_from_names(active_unlocked_names_for_stats(state.unlocked_gyms, current_stats, highest_idx, goal), target_stat) or GYM_DB[0]).energy_cost, combined_mods)}.',
     ]
     if jump_plan is not None:
         notes.append(f'Next jump window: {jump_plan.execute_at.strftime("%Y-%m-%d %H:%M")}.')
@@ -1638,13 +1789,13 @@ def choose_99k_target_stat(stats: PlayerStats) -> str:
     stat_map = stats.as_dict()
     return max(stat_map, key=stat_map.get)
 
-def get_unlocked_gyms(state: PlayerState) -> List[Gym]:
-    active_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_unlocked_gym_index(state))
+def get_unlocked_gyms(state: PlayerState, goal: Optional[GoalSettings] = None) -> List[Gym]:
+    active_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_unlocked_gym_index(state), goal)
     return [GYM_INDEX[name] for name in active_names if name in GYM_INDEX]
 
 
-def best_gym_for_stat(state: PlayerState, stat_key: str) -> Optional[Gym]:
-    candidates = [gym for gym in get_unlocked_gyms(state) if gym.gain_for(stat_key) > 0]
+def best_gym_for_stat(state: PlayerState, stat_key: str, goal: Optional[GoalSettings] = None) -> Optional[Gym]:
+    candidates = [gym for gym in get_unlocked_gyms(state, goal) if gym.gain_for(stat_key) > 0]
     if not candidates:
         return None
     candidates.sort(key=lambda gym: (gym.gain_for(stat_key), GYM_DB.index(gym)), reverse=True)
@@ -1785,7 +1936,7 @@ def build_specific_jump_plan(
     manual_selected: bool = False,
 ) -> Optional[JumpPlan]:
     target_stat = choose_99k_target_stat(state.stats) if jump_type == "super_happy_jump" else choose_target_stat(state.stats, ratio)
-    gym = best_gym_for_stat(state, target_stat)
+    gym = best_gym_for_stat(state, target_stat, goal)
     if gym is None:
         return None
 
@@ -1858,7 +2009,7 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
         return build_specific_jump_plan(state, ratio, goal, mods, "super_happy_jump", manual_99k_dt, manual_selected=True)
 
     target_stat = choose_target_stat(state.stats, ratio)
-    gym = best_gym_for_stat(state, target_stat)
+    gym = best_gym_for_stat(state, target_stat, goal)
     if gym is None:
         return None
 
@@ -1959,10 +2110,10 @@ def build_daily_instruction(state: PlayerState, ratio: RatioProfile, goal: GoalS
     day_type, jump_plan = day_type_for_date(state, ratio, goal, plan_day, combined_mods)
     if jump_plan is not None and day_type in {'prep', 'happy_jump', 'super_happy_jump'}:
         target_stat = jump_plan.target_stat
-        gym = GYM_INDEX.get(jump_plan.gym_name) or best_gym_for_stat(state, target_stat)
+        gym = GYM_INDEX.get(jump_plan.gym_name) or best_gym_for_stat(state, target_stat, goal)
     else:
         target_stat = choose_target_stat(state.stats, ratio)
-        gym = best_gym_for_stat(state, target_stat)
+        gym = best_gym_for_stat(state, target_stat, goal)
 
     if day_type == "war":
         return DailyInstruction(plan_day, "war", "none", "none", 0, 0, 0.0, 0, 0, ["Faction war day. Training skipped in baseline planner."])
@@ -2035,7 +2186,7 @@ def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods
         return 0
 
     target_stat = choose_target_stat(state.stats, RatioProfile())
-    gym = best_gym_for_stat(state, target_stat)
+    gym = best_gym_for_stat(state, target_stat, goal)
     if gym is None:
         return None
 
@@ -2187,7 +2338,7 @@ def auto_advance_gym_energy_progress(state: PlayerState, ratio: RatioProfile, go
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
-            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx),
+            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx, goal),
             faction_war_days=list(state.faction_war_days),
             torn_name=state.torn_name,
             torn_id=state.torn_id,
@@ -2223,7 +2374,7 @@ def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: Goal
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
-            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx),
+            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx, goal),
             faction_war_days=list(state.faction_war_days),
             torn_name=state.torn_name,
             torn_id=state.torn_id,
@@ -2257,21 +2408,36 @@ def estimate_next_gym_unlock(state: PlayerState, ratio: RatioProfile, goal: Goal
     )
 
 
-def estimate_frontline_unlock(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 365) -> SpecialistGymProjection:
+def estimate_specialist_unlock(gym_name: str, state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 365) -> SpecialistGymProjection:
     highest_idx = highest_unlocked_gym_index(state)
-    base_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_idx)
-    current_value, required_value, remaining_value = frontline_progress_values(state.stats)
-    parent_unlocked = FRONTLINE_PARENT_GYM_NAME in base_names
+    base_names = active_unlocked_names_for_stats(state.unlocked_gyms, state.stats, highest_idx, goal)
+    current_value, required_value, remaining_value, met = specialist_progress_snapshot(gym_name, state.stats, goal)
+    parent_gym = SPECIALIST_PARENT_MAP.get(gym_name, "")
+    parent_unlocked = specialist_parent_unlocked(base_names, gym_name)
+    requirement_text = SPECIALIST_REQUIREMENT_TEXT.get(gym_name, "")
 
-    if frontline_is_unlocked_for_stats(base_names, state.stats):
+    if specialist_is_available(base_names, state.stats, gym_name, goal):
         return SpecialistGymProjection(
-            gym_name=FRONTLINE_GYM_NAME,
-            parent_gym=FRONTLINE_PARENT_GYM_NAME,
-            parent_unlocked=True,
+            gym_name=gym_name,
+            parent_gym=parent_gym,
+            parent_unlocked=parent_unlocked,
             current_value=current_value,
             required_value=required_value,
-            remaining_value=0.0,
+            remaining_value=remaining_value,
             estimated_unlock_at=local_now(),
+            requirement_text=requirement_text,
+        )
+
+    if gym_name in {SSL_GYM_NAME, FIGHT_CLUB_NAME}:
+        return SpecialistGymProjection(
+            gym_name=gym_name,
+            parent_gym=parent_gym,
+            parent_unlocked=parent_unlocked,
+            current_value=current_value,
+            required_value=required_value,
+            remaining_value=remaining_value,
+            estimated_unlock_at=None,
+            requirement_text=requirement_text,
         )
 
     projected_stats = state.stats
@@ -2282,7 +2448,7 @@ def estimate_frontline_unlock(state: PlayerState, ratio: RatioProfile, goal: Goa
         projected_state = PlayerState(
             stats=projected_stats,
             recovery=state.recovery,
-            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx),
+            unlocked_gyms=active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx, goal),
             faction_war_days=list(state.faction_war_days),
             torn_name=state.torn_name,
             torn_id=state.torn_id,
@@ -2295,56 +2461,80 @@ def estimate_frontline_unlock(state: PlayerState, ratio: RatioProfile, goal: Goa
         _instruction, projected_stats, projected_highest_idx, projected_progress, unlock_time = simulate_day_with_unlocks(
             projected_state, ratio, goal, plan_day, manual_mods, projected_highest_idx, projected_progress
         )
-        projected_names = active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx)
-        if frontline_is_unlocked_for_stats(projected_names, projected_stats):
+        projected_names = active_unlocked_names_for_stats(state.unlocked_gyms, projected_stats, projected_highest_idx, goal)
+        if specialist_is_available(projected_names, projected_stats, gym_name, goal):
             est_time = unlock_time or datetime.combine(plan_day, dtime(hour=20, minute=0), tzinfo=APP_TIMEZONE)
-            current_value, required_value, remaining_value = frontline_progress_values(projected_stats)
+            current_value, required_value, remaining_value, _ = specialist_progress_snapshot(gym_name, projected_stats, goal)
             return SpecialistGymProjection(
-                gym_name=FRONTLINE_GYM_NAME,
-                parent_gym=FRONTLINE_PARENT_GYM_NAME,
-                parent_unlocked=FRONTLINE_PARENT_GYM_NAME in projected_names,
+                gym_name=gym_name,
+                parent_gym=parent_gym,
+                parent_unlocked=specialist_parent_unlocked(projected_names, gym_name),
                 current_value=current_value,
                 required_value=required_value,
                 remaining_value=remaining_value,
                 estimated_unlock_at=est_time,
+                requirement_text=requirement_text,
             )
 
     return SpecialistGymProjection(
-        gym_name=FRONTLINE_GYM_NAME,
-        parent_gym=FRONTLINE_PARENT_GYM_NAME,
+        gym_name=gym_name,
+        parent_gym=parent_gym,
         parent_unlocked=parent_unlocked,
         current_value=current_value,
         required_value=required_value,
         remaining_value=remaining_value,
         estimated_unlock_at=None,
+        requirement_text=requirement_text,
     )
 
 
-def render_frontline_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
-    st.subheader("Frontline Fitness progress")
-    projection = estimate_frontline_unlock(state, ratio, goal, manual_mods)
-    current_value = projection.current_value
-    required_value = max(projection.required_value, 1.0)
-    progress = min(1.0, current_value / required_value)
+def estimate_frontline_unlock(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers, days: int = 365) -> SpecialistGymProjection:
+    return estimate_specialist_unlock(FRONTLINE_GYM_NAME, state, ratio, goal, manual_mods, days)
 
-    st.write(f"Requirement: **{projection.parent_gym}** unlocked and **Strength + Speed** at least **25% higher** than **Dexterity + Defense**.")
-    if not projection.parent_unlocked:
-        st.info(f"You still need {projection.parent_gym} unlocked before {projection.gym_name} can open.")
-    st.write(f"Current Strength + Speed: **{current_value:,.0f}**")
-    st.write(f"Required for {projection.gym_name}: **{required_value:,.0f}**")
-    st.progress(progress)
-    if projection.remaining_value > 0:
-        st.caption(f"Remaining specialist requirement: {projection.remaining_value:,.0f}")
-    else:
-        st.caption(f"{projection.gym_name} requirement is currently met.")
-    if projection.estimated_unlock_at is not None:
-        unlock_at = to_local(projection.estimated_unlock_at)
-        if unlock_at <= local_now() + timedelta(minutes=1):
-            st.success(f"{projection.gym_name} is available now in the planner.")
-        else:
-            st.success(f"Projected {projection.gym_name} unlock: {fmt_local(unlock_at)}")
-    else:
-        st.info(f"Projected {projection.gym_name} unlock is beyond the current forecast window.")
+
+def render_specialist_gyms_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    st.subheader("Specialist gyms")
+    st.caption("These gyms unlock off parent gyms plus a build requirement. The planner will auto-use them whenever their requirements are met.")
+    specialist_order = [BALBOAS_GYM_NAME, FRONTLINE_GYM_NAME, GYM3000_NAME, ISOYAMAS_NAME, TOTAL_REBOUND_NAME, ELITES_NAME, SSL_GYM_NAME, FIGHT_CLUB_NAME]
+    projections = [estimate_specialist_unlock(name, state, ratio, goal, manual_mods) for name in specialist_order]
+    for i in range(0, len(projections), 2):
+        cols = st.columns(2)
+        for col, projection in zip(cols, projections[i:i+2]):
+            with col:
+                st.markdown(f"### {projection.gym_name}")
+                st.caption(projection.requirement_text)
+                if projection.parent_gym:
+                    st.write(f"Parent gym: **{projection.parent_gym}**")
+                if not projection.parent_unlocked:
+                    st.info(f"Parent not unlocked yet.")
+                if projection.gym_name == SSL_GYM_NAME:
+                    used_total = int(getattr(goal, 'ssl_combined_xanax_ecstasy_taken', 999))
+                    st.write(f"Combined Xanax + Ecstasy taken: **{used_total:,} / 150**")
+                    st.progress(min(1.0, max(0.0, (150 - min(used_total, 150)) / 150.0)))
+                elif projection.gym_name == FIGHT_CLUB_NAME:
+                    st.write(f"Manual access flag: **{'On' if getattr(goal, 'fight_club_access', False) else 'Off'}**")
+                    st.progress(1.0 if getattr(goal, 'fight_club_access', False) else 0.0)
+                else:
+                    required_value = max(projection.required_value, 1.0)
+                    st.write(f"Current requirement value: **{projection.current_value:,.0f}**")
+                    st.write(f"Required value: **{required_value:,.0f}**")
+                    st.progress(min(1.0, projection.current_value / required_value))
+                    if projection.remaining_value > 0:
+                        st.caption(f"Remaining gap: {projection.remaining_value:,.0f}")
+                if projection.estimated_unlock_at is not None:
+                    unlock_at = to_local(projection.estimated_unlock_at)
+                    if unlock_at <= local_now() + timedelta(minutes=1):
+                        st.success("Available now in the planner.")
+                    else:
+                        st.success(f"Projected unlock: {fmt_local(unlock_at)}")
+                elif projection.gym_name in {SSL_GYM_NAME, FIGHT_CLUB_NAME}:
+                    st.info("No automatic date projection for this requirement. Update the manual setting when it changes.")
+                else:
+                    st.info("Unlock is beyond the current forecast window.")
+
+
+def render_frontline_progress(state: PlayerState, ratio: RatioProfile, goal: GoalSettings, manual_mods: TrainingModifiers) -> None:
+    render_specialist_gyms_progress(state, ratio, goal, manual_mods)
 
 
 def render_goal_controls(goal: GoalSettings) -> GoalSettings:
@@ -2546,17 +2736,26 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     )
 
 
-def render_ratio_controls(ratio: RatioProfile) -> RatioProfile:
-    st.subheader("Baldr ratio")
+def render_ratio_controls(goal: GoalSettings, ratio: RatioProfile) -> Tuple[GoalSettings, RatioProfile]:
+    st.subheader("Build structure")
+    family = st.selectbox("Build family", options=BUILD_FAMILY_OPTIONS, index=BUILD_FAMILY_OPTIONS.index(goal.ratio_family) if goal.ratio_family in BUILD_FAMILY_OPTIONS else 0)
+    primary = st.selectbox("Primary stat", options=STAT_KEYS, index=STAT_KEYS.index(goal.ratio_primary_stat) if goal.ratio_primary_stat in STAT_KEYS else 0, format_func=lambda x: x.title())
+    st.caption(build_family_ratio_caption(family, primary))
+    st.caption(build_family_specialist_summary(family, primary))
+
+    display_ratio = ratio_profile_from_build(family, primary, ratio) if family != "Custom" else ratio
+    disabled = family != "Custom"
     c1, c2, c3, c4 = st.columns(4)
-    strength = c1.number_input("Strength %", min_value=0.0, max_value=100.0, value=float(ratio.strength), step=0.01)
-    speed = c2.number_input("Speed %", min_value=0.0, max_value=100.0, value=float(ratio.speed), step=0.01)
-    defense = c3.number_input("Defense %", min_value=0.0, max_value=100.0, value=float(ratio.defense), step=0.01)
-    dexterity = c4.number_input("Dexterity %", min_value=0.0, max_value=100.0, value=float(ratio.dexterity), step=0.01)
+    strength = c1.number_input("Strength %", min_value=0.0, max_value=100.0, value=float(display_ratio.strength), step=0.01, disabled=disabled)
+    speed = c2.number_input("Speed %", min_value=0.0, max_value=100.0, value=float(display_ratio.speed), step=0.01, disabled=disabled)
+    defense = c3.number_input("Defense %", min_value=0.0, max_value=100.0, value=float(display_ratio.defense), step=0.01, disabled=disabled)
+    dexterity = c4.number_input("Dexterity %", min_value=0.0, max_value=100.0, value=float(display_ratio.dexterity), step=0.01, disabled=disabled)
     total = strength + speed + defense + dexterity
     if abs(total - 100.0) > 0.05:
         st.warning(f"Ratio totals {total:.2f}%. Ideally this should equal 100%.")
-    return RatioProfile(strength=strength, speed=speed, defense=defense, dexterity=dexterity)
+    updated_goal = GoalSettings(**{**goal.__dict__, "ratio_family": family, "ratio_primary_stat": primary})
+    updated_ratio = RatioProfile(strength=strength, speed=speed, defense=defense, dexterity=dexterity)
+    return updated_goal, updated_ratio
 
 
 def render_manual_modifier_controls() -> TrainingModifiers:
@@ -2852,7 +3051,7 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
     combined_mods = state.training_modifiers.merge(manual_mods)
     today_type, jump_plan = day_type_for_date(state, ratio, goal, local_today(), combined_mods)
     target_stat = choose_target_stat(state.stats, ratio)
-    gym = best_gym_for_stat(state, target_stat)
+    gym = best_gym_for_stat(state, target_stat, goal)
     now_dt = local_now()
     actions: List[JumpStep] = []
 
@@ -2971,7 +3170,7 @@ def build_action_plan_for_date(state: PlayerState, ratio: RatioProfile, goal: Go
     instruction = instruction or build_daily_instruction(state, ratio, goal, plan_day, manual_mods)
     day_type, jump_plan = day_type_for_date(state, ratio, goal, plan_day, combined_mods)
     target_stat = instruction.target_stat if instruction.target_stat != "none" else choose_target_stat(state.stats, ratio)
-    gym = GYM_INDEX.get(instruction.gym_name) or best_gym_for_stat(state, target_stat)
+    gym = GYM_INDEX.get(instruction.gym_name) or best_gym_for_stat(state, target_stat, goal)
     day_start = datetime.combine(plan_day, dtime(hour=8, minute=0), tzinfo=APP_TIMEZONE)
     actions: List[JumpStep] = []
 
@@ -3115,7 +3314,7 @@ def render_war_calendar_editor(state: PlayerState) -> None:
 def render_gain_debug_panel(state: PlayerState, goal: GoalSettings, ratio: RatioProfile, manual_mods: TrainingModifiers) -> None:
     st.subheader("Gain engine debug")
     target_stat = choose_target_stat(state.stats, ratio)
-    gym = best_gym_for_stat(state, target_stat)
+    gym = best_gym_for_stat(state, target_stat, goal)
     if gym is None:
         st.warning("No gym selected yet.")
         return
@@ -3584,7 +3783,15 @@ def render_setup_tab() -> TrainingModifiers:
     st.subheader("Planner setup")
     st.caption("All planning inputs live here so the rest of the app can focus on results.")
     st.session_state.goal_settings = render_goal_controls(st.session_state.goal_settings)
-    st.session_state.ratio_profile = render_ratio_controls(st.session_state.ratio_profile)
+    st.session_state.goal_settings, st.session_state.ratio_profile = render_ratio_controls(st.session_state.goal_settings, st.session_state.ratio_profile)
+    st.subheader("Specialist gym settings")
+    c1, c2 = st.columns(2)
+    with c1:
+        ssl_taken = st.number_input("Lifetime Xanax + Ecstasy taken (for SSL)", min_value=0, value=int(st.session_state.goal_settings.ssl_combined_xanax_ecstasy_taken), step=1)
+    with c2:
+        fight_access = st.checkbox("I have Fight Club access", value=bool(st.session_state.goal_settings.fight_club_access))
+    st.caption("SSL only opens if Last Round is unlocked and your combined Xanax + Ecstasy total is 150 or less. Fight Club is manual because its requirement is not public.")
+    st.session_state.goal_settings = GoalSettings(**{**st.session_state.goal_settings.__dict__, "ssl_combined_xanax_ecstasy_taken": int(ssl_taken), "fight_club_access": bool(fight_access)})
     manual_mods = render_manual_modifier_controls()
     st.session_state.manual_mods = manual_mods
     return manual_mods
@@ -3652,7 +3859,7 @@ def main() -> None:
             render_gain_debug_panel(player_state, st.session_state.goal_settings, st.session_state.ratio_profile, manual_mods)
     elif selected_section == "Gyms":
         render_next_gym_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
-        render_frontline_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
+        render_specialist_gyms_progress(player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
         render_unlocked_gym_editor(player_state)
     elif selected_section == "Calendar":
         render_calendar_tab(plan, player_state, st.session_state.ratio_profile, st.session_state.goal_settings, manual_mods)
