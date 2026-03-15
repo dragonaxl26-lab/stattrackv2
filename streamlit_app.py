@@ -2417,6 +2417,26 @@ def init_state() -> None:
         st.session_state._persistence_error = None
     if "active_section" not in st.session_state:
         st.session_state.active_section = "Calendar"
+    if "notifications_enabled" not in st.session_state:
+        st.session_state.notifications_enabled = True
+    if "notification_toasts_enabled" not in st.session_state:
+        st.session_state.notification_toasts_enabled = True
+    if "notification_browser_enabled" not in st.session_state:
+        st.session_state.notification_browser_enabled = False
+    if "notification_lead_minutes" not in st.session_state:
+        st.session_state.notification_lead_minutes = 10
+    if "notify_refill_ready" not in st.session_state:
+        st.session_state.notify_refill_ready = True
+    if "notify_drug_clear" not in st.session_state:
+        st.session_state.notify_drug_clear = True
+    if "notify_booster_clear" not in st.session_state:
+        st.session_state.notify_booster_clear = True
+    if "notify_jump_prep" not in st.session_state:
+        st.session_state.notify_jump_prep = True
+    if "notify_jump_execute" not in st.session_state:
+        st.session_state.notify_jump_execute = True
+    if "notify_gym_unlock" not in st.session_state:
+        st.session_state.notify_gym_unlock = True
 
 
 def render_sidebar() -> Tuple[str, int]:
@@ -2470,19 +2490,19 @@ def render_sidebar() -> Tuple[str, int]:
         st.sidebar.caption(f"Displayed times are using {get_app_timezone_label()}.")
 
     st.sidebar.header("Notifications")
-    st.session_state.notifications_enabled = st.sidebar.checkbox("Enable notifications", value=bool(st.session_state.notifications_enabled))
-    st.session_state.notification_toasts_enabled = st.sidebar.checkbox("In-app toasts", value=bool(st.session_state.notification_toasts_enabled), disabled=not bool(st.session_state.notifications_enabled))
-    st.session_state.notification_browser_enabled = st.sidebar.checkbox("Browser notifications", value=bool(st.session_state.notification_browser_enabled), disabled=not bool(st.session_state.notifications_enabled), help="Works while the tab is open. Your browser may ask for permission the first time a notification fires.")
-    st.session_state.notification_lead_minutes = int(st.sidebar.number_input("Lead time (minutes)", min_value=0, max_value=240, value=int(st.session_state.notification_lead_minutes), step=5, disabled=not bool(st.session_state.notifications_enabled)))
+    st.session_state.notifications_enabled = st.sidebar.checkbox("Enable notifications", value=bool(st.session_state.get("notifications_enabled", True)))
+    st.session_state.notification_toasts_enabled = st.sidebar.checkbox("In-app toasts", value=bool(st.session_state.get("notification_toasts_enabled", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
+    st.session_state.notification_browser_enabled = st.sidebar.checkbox("Browser notifications", value=bool(st.session_state.get("notification_browser_enabled", False)), disabled=not bool(st.session_state.get("notifications_enabled", True)), help="Works while the tab is open. Your browser may ask for permission the first time a notification fires.")
+    st.session_state.notification_lead_minutes = int(st.sidebar.number_input("Lead time (minutes)", min_value=0, max_value=240, value=int(st.session_state.get("notification_lead_minutes", 10)), step=5, disabled=not bool(st.session_state.get("notifications_enabled", True))))
     cna, cnb = st.sidebar.columns(2)
     with cna:
-        st.session_state.notify_refill_ready = st.checkbox("Refill", value=bool(st.session_state.notify_refill_ready), disabled=not bool(st.session_state.notifications_enabled))
-        st.session_state.notify_drug_clear = st.checkbox("Drug", value=bool(st.session_state.notify_drug_clear), disabled=not bool(st.session_state.notifications_enabled))
-        st.session_state.notify_booster_clear = st.checkbox("Booster", value=bool(st.session_state.notify_booster_clear), disabled=not bool(st.session_state.notifications_enabled))
+        st.session_state.notify_refill_ready = st.checkbox("Refill", value=bool(st.session_state.get("notify_refill_ready", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
+        st.session_state.notify_drug_clear = st.checkbox("Drug", value=bool(st.session_state.get("notify_drug_clear", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
+        st.session_state.notify_booster_clear = st.checkbox("Booster", value=bool(st.session_state.get("notify_booster_clear", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
     with cnb:
-        st.session_state.notify_jump_prep = st.checkbox("Jump prep", value=bool(st.session_state.notify_jump_prep), disabled=not bool(st.session_state.notifications_enabled))
-        st.session_state.notify_jump_execute = st.checkbox("Jump execute", value=bool(st.session_state.notify_jump_execute), disabled=not bool(st.session_state.notifications_enabled))
-        st.session_state.notify_gym_unlock = st.checkbox("Gym unlock", value=bool(st.session_state.notify_gym_unlock), disabled=not bool(st.session_state.notifications_enabled))
+        st.session_state.notify_jump_prep = st.checkbox("Jump prep", value=bool(st.session_state.get("notify_jump_prep", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
+        st.session_state.notify_jump_execute = st.checkbox("Jump execute", value=bool(st.session_state.get("notify_jump_execute", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
+        st.session_state.notify_gym_unlock = st.checkbox("Gym unlock", value=bool(st.session_state.get("notify_gym_unlock", True)), disabled=not bool(st.session_state.get("notifications_enabled", True)))
 
     st.sidebar.header("Planner assumptions")
     st.sidebar.caption("These match the locked v2 rules.")
