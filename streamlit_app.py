@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict, is_dataclass
+from dataclasses import dataclass, field, fields, asdict, is_dataclass
 from datetime import date, datetime, timedelta, time as dtime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
