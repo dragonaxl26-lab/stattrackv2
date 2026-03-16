@@ -133,6 +133,9 @@ def _current_persistence_payload() -> Dict[str, Any]:
         "preview_days": st.session_state.get("preview_days", 30),
         "display_timezone_name": st.session_state.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME),
         "use_tct_times": st.session_state.get("use_tct_times", False),
+        "sleep_schedule_enabled": st.session_state.get("sleep_schedule_enabled", False),
+        "sleep_start_time": st.session_state.get("sleep_start_time", dtime(hour=23, minute=0)),
+        "sleep_end_time": st.session_state.get("sleep_end_time", dtime(hour=7, minute=0)),
         "notifications_enabled": st.session_state.get("notifications_enabled", True),
         "notification_toasts_enabled": st.session_state.get("notification_toasts_enabled", True),
         "notification_browser_enabled": st.session_state.get("notification_browser_enabled", False),
@@ -191,6 +194,9 @@ def reset_runtime_state(keep_api_fields: bool = True) -> None:
     st.session_state.preview_days = 30
     st.session_state.display_timezone_name = DEFAULT_APP_TIMEZONE_NAME
     st.session_state.use_tct_times = False
+    st.session_state.sleep_schedule_enabled = False
+    st.session_state.sleep_start_time = dtime(hour=23, minute=0)
+    st.session_state.sleep_end_time = dtime(hour=7, minute=0)
     st.session_state.notifications_enabled = True
     st.session_state.notification_toasts_enabled = True
     st.session_state.notification_browser_enabled = False
@@ -229,6 +235,9 @@ def _apply_persistent_payload(payload: Dict[str, Any]) -> None:
     st.session_state.preview_days = int(payload.get("preview_days", 30))
     st.session_state.display_timezone_name = payload.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME)
     st.session_state.use_tct_times = bool(payload.get("use_tct_times", False))
+    st.session_state.sleep_schedule_enabled = bool(payload.get("sleep_schedule_enabled", False))
+    st.session_state.sleep_start_time = payload.get("sleep_start_time", dtime(hour=23, minute=0))
+    st.session_state.sleep_end_time = payload.get("sleep_end_time", dtime(hour=7, minute=0))
     st.session_state.notifications_enabled = bool(payload.get("notifications_enabled", True))
     st.session_state.notification_toasts_enabled = bool(payload.get("notification_toasts_enabled", True))
     st.session_state.notification_browser_enabled = bool(payload.get("notification_browser_enabled", False))
@@ -470,6 +479,96 @@ def next_daily_refill_ready_local(goal: "GoalSettings", now_dt: Optional[datetim
     if not getattr(goal, "daily_refill_used_today", True):
         return max(after_dt, now_dt + timedelta(minutes=10))
     return max(after_dt, next_tst_midnight_local(now_dt))
+
+
+def _minutes_between_times(start: dtime, end: dtime) -> int:
+    start_minutes = start.hour * 60 + start.minute
+    end_minutes = end.hour * 60 + end.minute
+    if end_minutes >= start_minutes:
+        return end_minutes - start_minutes
+    return (24 * 60 - start_minutes) + end_minutes
+
+
+def sleep_minutes_per_day(goal: "GoalSettings") -> int:
+    if not getattr(goal, "sleep_schedule_enabled", False):
+        return 0
+    start = getattr(goal, "sleep_start_time", dtime(hour=23, minute=0))
+    end = getattr(goal, "sleep_end_time", dtime(hour=7, minute=0))
+    if start == end:
+        return 0
+    return _minutes_between_times(start, end)
+
+
+def awake_minutes_per_day(goal: "GoalSettings") -> int:
+    return max(0, 24 * 60 - sleep_minutes_per_day(goal))
+
+
+def is_sleep_time(goal: "GoalSettings", dt: datetime) -> bool:
+    if not getattr(goal, "sleep_schedule_enabled", False):
+        return False
+    local_dt = to_local(dt)
+    start = getattr(goal, "sleep_start_time", dtime(hour=23, minute=0))
+    end = getattr(goal, "sleep_end_time", dtime(hour=7, minute=0))
+    current = local_dt.time().replace(second=0, microsecond=0)
+    if start == end:
+        return False
+    if start < end:
+        return start <= current < end
+    return current >= start or current < end
+
+
+def next_awake_time(goal: "GoalSettings", dt: datetime) -> datetime:
+    candidate = to_local(dt)
+    if not is_sleep_time(goal, candidate):
+        return candidate
+    end = getattr(goal, "sleep_end_time", dtime(hour=7, minute=0))
+    if candidate.time() < end:
+        wake_date = candidate.date()
+    else:
+        wake_date = candidate.date() + timedelta(days=1)
+    return datetime.combine(wake_date, end, tzinfo=APP_TIMEZONE)
+
+
+def next_awake_quarter_hour(goal: "GoalSettings", dt: datetime) -> datetime:
+    candidate = to_local(dt)
+    if is_sleep_time(goal, candidate):
+        candidate = next_awake_time(goal, candidate)
+        if candidate.minute % 15 == 0 and candidate.second == 0 and candidate.microsecond == 0:
+            return candidate.replace(second=5)
+    return next_quarter_hour(candidate)
+
+
+def schedule_action_time(goal: "GoalSettings", dt: datetime) -> datetime:
+    return next_awake_time(goal, to_local(dt))
+
+
+def estimated_daily_xanax_capacity(state: "PlayerState", goal: "GoalSettings") -> int:
+    awake_minutes = awake_minutes_per_day(goal) if getattr(goal, "sleep_schedule_enabled", False) else 24 * 60
+    cooldown_minutes = max(1, int(round(float(getattr(goal, "assumed_xanax_cooldown_hours", 8.0)) * 60)))
+    if awake_minutes <= 0:
+        return 0
+    capacity = 1 + max(0, (awake_minutes - 1) // cooldown_minutes)
+    return max(0, min(int(state.recovery.xanax_per_day), int(capacity)))
+
+
+def planner_baseline_energy_per_day(state: "PlayerState", goal: "GoalSettings", mods: "TrainingModifiers") -> int:
+    total = state.recovery.natural_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    total += estimated_daily_xanax_capacity(state, goal) * state.recovery.xanax_energy
+    if state.recovery.daily_refill_enabled:
+        total += state.recovery.refill_energy
+    return total
+
+
+def sleep_schedule_summary(goal: "GoalSettings", assumed_xanax_cooldown_hours: Optional[float] = None) -> str:
+    if not getattr(goal, "sleep_schedule_enabled", False):
+        return "Sleep schedule is off."
+    awake = awake_minutes_per_day(goal)
+    hours = awake // 60
+    minutes = awake % 60
+    cooldown_hours = float(assumed_xanax_cooldown_hours if assumed_xanax_cooldown_hours is not None else getattr(goal, "assumed_xanax_cooldown_hours", 8.0))
+    cooldown_minutes = max(1, int(round(cooldown_hours * 60)))
+    xanax_capacity = 1 + max(0, (awake - 1) // cooldown_minutes) if awake > 0 else 0
+    return f"Wake window is about {hours}h {minutes}m per day. Baseline Xanax capacity while awake is about {xanax_capacity} dose(s)."
 
 
 @dataclass
@@ -745,6 +844,9 @@ class GoalSettings:
     can_cooldown_hours: float = 2.0
     fhc_cooldown_hours: float = 6.0
     max_daily_booster_cooldown_hours: float = 24.0
+    sleep_schedule_enabled: bool = False
+    sleep_start_time: dtime = dtime(hour=23, minute=0)
+    sleep_end_time: dtime = dtime(hour=7, minute=0)
     today_energy_loss_adjustment: int = 0
     forecast_energy_loss_per_day: int = 0
     ratio_family: str = "Baldr"
@@ -2367,7 +2469,7 @@ def build_specific_jump_plan(
     if gym is None:
         return None
 
-    normal_energy = state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    normal_energy = planner_baseline_energy_per_day(state, goal, mods)
     normal_start_happy = max(state.recovery.max_happy, goal.normal_day_start_happy)
     normal_sim = simulate_training_block(state.stats, target_stat, gym, normal_energy, normal_start_happy, mods)
 
@@ -2412,9 +2514,9 @@ def build_specific_jump_plan(
 def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> datetime:
     now_dt = local_now()
     prep_ready = now_dt + timedelta(minutes=max(state.recovery.drug_cd_minutes, state.recovery.booster_cd_minutes))
-    candidate = next_quarter_hour(prep_ready + timedelta(hours=goal.jump_prep_hours))
+    candidate = next_awake_quarter_hour(goal, prep_ready + timedelta(hours=goal.jump_prep_hours)) if getattr(goal, "sleep_schedule_enabled", False) else next_quarter_hour(prep_ready + timedelta(hours=goal.jump_prep_hours))
     while (not goal.allow_jump_on_war_days) and (candidate.date() in state.faction_war_days):
-        candidate = next_quarter_hour(candidate + timedelta(days=1))
+        candidate = next_awake_quarter_hour(goal, candidate + timedelta(days=1)) if getattr(goal, "sleep_schedule_enabled", False) else next_quarter_hour(candidate + timedelta(days=1))
     return candidate
 
 
@@ -2423,9 +2525,12 @@ def planned_xanax_stack_times(state: PlayerState, goal: GoalSettings, execute_at
     first_candidate = execute_at - timedelta(hours=goal.jump_prep_hours)
     earliest_allowed = local_now() + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
     first = max(first_candidate, earliest_allowed)
+    first = schedule_action_time(goal, first) if getattr(goal, "sleep_schedule_enabled", False) else first
     times = [first]
     for _ in range(1, int(goal.jump_stack_xanax_uses)):
-        times.append(times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours)))
+        next_time = times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
+        next_time = schedule_action_time(goal, next_time) if getattr(goal, "sleep_schedule_enabled", False) else next_time
+        times.append(next_time)
     return times
 
 
@@ -2440,7 +2545,7 @@ def build_jump_plan(state: PlayerState, ratio: RatioProfile, goal: GoalSettings,
     if gym is None:
         return None
 
-    normal_energy = state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    normal_energy = planner_baseline_energy_per_day(state, goal, mods)
     normal_start_happy = max(state.recovery.max_happy, goal.normal_day_start_happy)
     normal_sim = simulate_training_block(state.stats, target_stat, gym, normal_energy, normal_start_happy, mods)
 
@@ -2528,7 +2633,7 @@ def energy_budget_for_day(state: PlayerState, goal: GoalSettings, plan_day: date
     if day_type in {"happy_jump", "super_happy_jump"}:
         jump_energy = goal.jump_stack_energy_target + (state.recovery.refill_energy if state.recovery.daily_refill_enabled else 0)
         return apply_energy_losses(goal, plan_day, jump_energy)
-    baseline = state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    baseline = planner_baseline_energy_per_day(state, goal, mods)
     return apply_energy_losses(goal, plan_day, baseline)
 
 
@@ -2619,7 +2724,7 @@ def days_until_goal_estimate(state: PlayerState, goal: GoalSettings, manual_mods
 
     combined_mods = state.training_modifiers.merge(manual_mods)
     start_happy = max(state.recovery.max_happy, goal.normal_day_start_happy)
-    baseline_energy = apply_energy_losses(goal, local_today(), state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct))
+    baseline_energy = apply_energy_losses(goal, local_today(), planner_baseline_energy_per_day(state, goal, combined_mods))
     sim = simulate_training_block(state.stats, target_stat, gym, baseline_energy, start_happy, combined_mods)
     est_daily_gain = float(sim["total_gain"])
 
@@ -2673,6 +2778,12 @@ def init_state() -> None:
     set_app_timezone(st.session_state.display_timezone_name)
     if "use_tct_times" not in st.session_state:
         st.session_state.use_tct_times = False
+    if "sleep_schedule_enabled" not in st.session_state:
+        st.session_state.sleep_schedule_enabled = False
+    if "sleep_start_time" not in st.session_state:
+        st.session_state.sleep_start_time = dtime(hour=23, minute=0)
+    if "sleep_end_time" not in st.session_state:
+        st.session_state.sleep_end_time = dtime(hour=7, minute=0)
     if "api_key_input" not in st.session_state:
         st.session_state.api_key_input = ""
     if "_loaded_persistence_namespace" not in st.session_state:
@@ -3030,6 +3141,19 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
     refill_reset_local = next_tst_midnight_local()
     st.caption(f"App times are shown in {get_app_timezone_label()}. Torn resets use {TORN_TIMEZONE_LABEL}. {app_vs_tst_text()}. Next TST midnight / refill reset in your selected timezone: {fmt_local(refill_reset_local)} ({fmt_tst(refill_reset_local)}).")
 
+    st.markdown("**Sleep schedule**")
+    st.caption("Use this so the planner avoids scheduling training, Xanax, refills, and other timed actions while you are asleep.")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        sleep_schedule_enabled = st.checkbox("Respect sleep schedule", value=getattr(goal, "sleep_schedule_enabled", False), key="sleep_schedule_enabled")
+    with s2:
+        sleep_start_time = st.time_input("Sleep start", value=getattr(goal, "sleep_start_time", dtime(hour=23, minute=0)), step=timedelta(minutes=15), key="sleep_start_time")
+    with s3:
+        sleep_end_time = st.time_input("Wake time", value=getattr(goal, "sleep_end_time", dtime(hour=7, minute=0)), step=timedelta(minutes=15), key="sleep_end_time")
+    if sleep_schedule_enabled:
+        preview_goal = GoalSettings(sleep_schedule_enabled=True, sleep_start_time=sleep_start_time, sleep_end_time=sleep_end_time, assumed_xanax_cooldown_hours=float(goal.assumed_xanax_cooldown_hours))
+        st.caption(sleep_schedule_summary(preview_goal, assumed_xanax_cooldown_hours=float(goal.assumed_xanax_cooldown_hours)))
+
     c7, c8, c9 = st.columns(3)
     with c7:
         normal_day_start_happy = st.number_input("Normal day happy", min_value=0, value=int(goal.normal_day_start_happy), step=100)
@@ -3200,6 +3324,9 @@ def render_goal_controls(goal: GoalSettings) -> GoalSettings:
         can_cooldown_hours=float(can_cooldown_hours),
         fhc_cooldown_hours=float(fhc_cooldown_hours),
         max_daily_booster_cooldown_hours=float(max_daily_booster_cooldown_hours),
+        sleep_schedule_enabled=bool(sleep_schedule_enabled),
+        sleep_start_time=sleep_start_time,
+        sleep_end_time=sleep_end_time,
         today_energy_loss_adjustment=int(today_energy_loss_adjustment),
         forecast_energy_loss_per_day=int(forecast_energy_loss_per_day),
     )
@@ -3365,7 +3492,7 @@ def render_player_snapshot(state: PlayerState, goal: GoalSettings, manual_mods: 
     current_ratio = calculate_current_ratio(state.stats)
     st.caption("Current ratio: " + " | ".join(f"{k.title()} {v:.2f}%" for k, v in current_ratio.items()))
     st.caption(
-        f"Baseline daily energy: {state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct):,} "
+        f"Baseline daily energy: {planner_baseline_energy_per_day(state, goal, combined_mods):,} "
         f"(natural {state.recovery.natural_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct):,} + xanax + refill)"
     )
 
@@ -3869,12 +3996,12 @@ def render_gain_debug_panel(state: PlayerState, goal: GoalSettings, ratio: Ratio
         base_stats=state.stats,
         stat_key=target_stat,
         gym=gym,
-        total_energy=min(150, state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct)),
+        total_energy=min(150, planner_baseline_energy_per_day(state, goal, combined_mods)),
         starting_happy=start_happy,
         mods=combined_mods,
     )
 
-    st.caption(f"Previewing first {min(150, state.recovery.baseline_energy_per_day(energy_regen_bonus_pct=combined_mods.energy_regen_bonus_pct))} energy into {target_stat.title()} at {gym.name}.")
+    st.caption(f"Previewing first {min(150, planner_baseline_energy_per_day(state, goal, combined_mods))} energy into {target_stat.title()} at {gym.name}.")
     rows = []
     for item in sim["per_train_preview"]:
         rows.append({"Train #": item["train"], "Happy before": round(item["happy_before"], 2), "Gain": round(item["gain"], 4)})
