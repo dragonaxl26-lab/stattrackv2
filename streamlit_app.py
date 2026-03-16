@@ -551,8 +551,22 @@ def estimated_daily_xanax_capacity(state: "PlayerState", goal: "GoalSettings") -
     return max(0, min(int(state.recovery.xanax_per_day), int(capacity)))
 
 
+def sleep_aware_natural_energy_per_day(state: "PlayerState", goal: "GoalSettings", mods: "TrainingModifiers") -> int:
+    daily_natural = state.recovery.natural_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    if not getattr(goal, "sleep_schedule_enabled", False):
+        return daily_natural
+    sleep_minutes = sleep_minutes_per_day(goal)
+    awake_minutes = max(0, 24 * 60 - sleep_minutes)
+    if sleep_minutes <= 0:
+        return daily_natural
+    regen_per_minute = daily_natural / 1440.0
+    awake_regen = int(round(awake_minutes * regen_per_minute))
+    sleep_regen_carry = min(int(state.recovery.max_energy), int(round(sleep_minutes * regen_per_minute)))
+    return max(0, awake_regen + sleep_regen_carry)
+
+
 def planner_baseline_energy_per_day(state: "PlayerState", goal: "GoalSettings", mods: "TrainingModifiers") -> int:
-    total = state.recovery.natural_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
+    total = sleep_aware_natural_energy_per_day(state, goal, mods)
     total += estimated_daily_xanax_capacity(state, goal) * state.recovery.xanax_energy
     if state.recovery.daily_refill_enabled:
         total += state.recovery.refill_energy
@@ -2082,10 +2096,49 @@ def end_of_day(dt: datetime) -> datetime:
     return dt.replace(hour=23, minute=59, second=59, microsecond=0)
 
 
-def natural_energy_between(state: PlayerState, mods: TrainingModifiers, start_dt: datetime, end_dt: datetime) -> int:
+def awake_minutes_between(goal: GoalSettings, start_dt: datetime, end_dt: datetime) -> int:
+    start_local = to_local(start_dt)
+    end_local = to_local(end_dt)
+    if end_local <= start_local:
+        return 0
+    if not getattr(goal, "sleep_schedule_enabled", False):
+        return int((end_local - start_local).total_seconds() // 60)
+
+    total_minutes = 0
+    cursor = start_local
+    while cursor < end_local:
+        day = cursor.date()
+        start_sleep = getattr(goal, "sleep_start_time", dtime(hour=23, minute=0))
+        end_sleep = getattr(goal, "sleep_end_time", dtime(hour=7, minute=0))
+        if start_sleep == end_sleep:
+            interval_start = cursor
+            interval_end = min(end_local, datetime.combine(day + timedelta(days=1), dtime.min, tzinfo=APP_TIMEZONE))
+            total_minutes += max(0, int((interval_end - interval_start).total_seconds() // 60))
+            cursor = interval_end
+            continue
+
+        awake_windows = []
+        if start_sleep < end_sleep:
+            awake_windows.append((datetime.combine(day, dtime.min, tzinfo=APP_TIMEZONE), datetime.combine(day, start_sleep, tzinfo=APP_TIMEZONE)))
+            awake_windows.append((datetime.combine(day, end_sleep, tzinfo=APP_TIMEZONE), datetime.combine(day + timedelta(days=1), dtime.min, tzinfo=APP_TIMEZONE)))
+        else:
+            awake_windows.append((datetime.combine(day, end_sleep, tzinfo=APP_TIMEZONE), datetime.combine(day, start_sleep, tzinfo=APP_TIMEZONE)))
+
+        day_end = datetime.combine(day + timedelta(days=1), dtime.min, tzinfo=APP_TIMEZONE)
+        for win_start, win_end in awake_windows:
+            overlap_start = max(start_local, win_start)
+            overlap_end = min(end_local, win_end)
+            if overlap_end > overlap_start:
+                total_minutes += int((overlap_end - overlap_start).total_seconds() // 60)
+        cursor = day_end
+
+    return total_minutes
+
+
+def natural_energy_between(state: PlayerState, goal: GoalSettings, mods: TrainingModifiers, start_dt: datetime, end_dt: datetime) -> int:
     if end_dt <= start_dt:
         return 0
-    minutes = (end_dt - start_dt).total_seconds() / 60.0
+    minutes = awake_minutes_between(goal, start_dt, end_dt)
     if minutes <= 0:
         return 0
     daily_natural = state.recovery.natural_energy_per_day(energy_regen_bonus_pct=mods.energy_regen_bonus_pct)
@@ -2106,7 +2159,7 @@ def build_today_energy_blocks(state: PlayerState, goal: GoalSettings, mods: Trai
             blocks.append((refill_time, int(state.recovery.refill_energy), refill_source))
 
     eod = end_of_day(now_dt)
-    natural_e = natural_energy_between(state, mods, now_dt, eod)
+    natural_e = natural_energy_between(state, goal, mods, now_dt, eod)
     if natural_e > 0:
         blocks.append((eod, natural_e, 'natural regen through end of day'))
 
@@ -3680,18 +3733,18 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
         else:
             actions.append(JumpStep(refill_dt, "Daily refill resets (TST midnight)", f"Your daily refill resets at Torn midnight. That is {fmt_local(refill_dt)} in your selected timezone / {fmt_tst(refill_dt)} in Torn Standard Time."))
             if refill_dt.date() == now_dt.date():
-                actions.append(JumpStep(refill_dt + timedelta(minutes=1), "Use daily refill after reset", "Use your daily refill once the TST reset hits if you are still training today."))
-                actions.append(JumpStep(refill_dt + timedelta(minutes=2), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
+                actions.append(JumpStep(schedule_action_time(goal, refill_dt + timedelta(minutes=1)), "Use daily refill after reset", "Use your daily refill once the TST reset hits if you are still training today."))
+                actions.append(JumpStep(schedule_action_time(goal, refill_dt + timedelta(minutes=2)), "Train refill energy", f"Train the refill energy into {target_stat.title()} at {gym.name}."))
 
-    natural_e = natural_energy_between(state, combined_mods, now_dt, end_of_day(now_dt))
+    natural_e = natural_energy_between(state, goal, combined_mods, now_dt, end_of_day(now_dt))
     if natural_e > 0:
-        actions.append(JumpStep(end_of_day(now_dt), "Natural regen through end of day", f"About {natural_e} natural energy will regenerate by the end of today at your current regen rate."))
+        actions.append(JumpStep(schedule_action_time(goal, end_of_day(now_dt)), "Natural regen while awake" if getattr(goal, "sleep_schedule_enabled", False) else "Natural regen through end of day", f"About {natural_e} natural energy will regenerate while you are awake for the rest of today at your current regen rate." if getattr(goal, "sleep_schedule_enabled", False) else f"About {natural_e} natural energy will regenerate by the end of today at your current regen rate."))
 
     if state.recovery.drug_cd_minutes > 0:
         drug_clear_dt = now_dt + timedelta(minutes=state.recovery.drug_cd_minutes)
         actions.append(JumpStep(drug_clear_dt, "Drug cooldown clears", "You cannot take another Xanax until this time."))
         if drug_clear_dt.date() == now_dt.date():
-            actions.append(JumpStep(drug_clear_dt + timedelta(minutes=1), "Take next Xanax", f"If you are following the baseline plan, take Xanax at cooldown clear and train the extra {state.recovery.xanax_energy} energy after it lands."))
+            actions.append(JumpStep(schedule_action_time(goal, drug_clear_dt + timedelta(minutes=1)), "Take next Xanax", f"If you are following the baseline plan, take Xanax at cooldown clear and train the extra {state.recovery.xanax_energy} energy after it lands."))
     else:
         actions.append(JumpStep(now_dt, "Drug available now", "You can take your next Xanax whenever you decide to use it."))
 
@@ -3748,16 +3801,16 @@ def build_today_action_plan(state: PlayerState, ratio: RatioProfile, goal: GoalS
                     remaining_can -= 1
             # Highest cooldown item should be the last use because its cooldown is effectively free in the 24h window.
             sequence.sort(key=lambda s: float(goal.fhc_cooldown_hours) if s == "FHC" else float(goal.can_cooldown_hours))
-            booster_time = booster_ready
+            booster_time = schedule_action_time(goal, booster_ready)
             for idx, source_name in enumerate(sequence):
                 if source_name == "FHC":
                     actions.append(JumpStep(booster_time, f"Use FHC #{sum(1 for s in sequence[:idx+1] if s == 'FHC')}", f"Use one FHC for about {goal.fhc_effective_energy} energy, then train it in {gym.name}."))
                     if idx < len(sequence) - 1:
-                        booster_time = booster_time + fhc_cd
+                        booster_time = schedule_action_time(goal, booster_time + fhc_cd)
                 else:
                     actions.append(JumpStep(booster_time, f"Use energy can #{sum(1 for s in sequence[:idx+1] if s == 'Energy can')}", f"Use one can for about {goal.can_energy_per_can} energy, then train it in {gym.name}."))
                     if idx < len(sequence) - 1:
-                        booster_time = booster_time + can_cd
+                        booster_time = schedule_action_time(goal, booster_time + can_cd)
             max_booster_energy = fhc_units * int(goal.fhc_effective_energy) + can_units * int(goal.can_energy_per_can)
             if required_extra_energy > bonus_energy:
                 actions.append(JumpStep(now_dt, "Booster cap reached", f"Your daily booster limit only allows about {max_booster_energy} energy from FHC/cans in the next {goal.max_daily_booster_cooldown_hours:.0f} hours, so the optimizer cannot reach the full extra-energy target today."))
@@ -3779,7 +3832,9 @@ def build_action_plan_for_date(state: PlayerState, ratio: RatioProfile, goal: Go
     day_type, jump_plan = day_type_for_date(state, ratio, goal, plan_day, combined_mods)
     target_stat = instruction.target_stat if instruction.target_stat != "none" else choose_target_stat(state.stats, ratio)
     gym = GYM_INDEX.get(instruction.gym_name) or best_gym_for_stat(state, target_stat, goal)
-    day_start = datetime.combine(plan_day, dtime(hour=8, minute=0), tzinfo=APP_TIMEZONE)
+    wake_start = datetime.combine(plan_day, getattr(goal, "sleep_end_time", dtime(hour=7, minute=0)), tzinfo=APP_TIMEZONE)
+    default_start = datetime.combine(plan_day, dtime(hour=8, minute=0), tzinfo=APP_TIMEZONE)
+    day_start = next_awake_time(goal, max(default_start, wake_start if getattr(goal, "sleep_schedule_enabled", False) else default_start))
     actions: List[JumpStep] = []
 
     if instruction.day_type == "war":
@@ -3793,31 +3848,44 @@ def build_action_plan_for_date(state: PlayerState, ratio: RatioProfile, goal: Go
 
     actions.append(JumpStep(day_start, "Start main training block", f"Train {instruction.target_stat.title()} in {gym.name}. Planned energy for the day is about {instruction.estimated_energy:,}."))
 
-    # Assumed baseline schedule for future normal days.
     if instruction.day_type == "normal":
         if state.recovery.current_energy > 0:
             actions.append(JumpStep(day_start, "Spend opening energy", f"Use your opening energy toward {instruction.target_stat.title()} at {gym.name}."))
         if state.recovery.daily_refill_enabled:
-            refill_at = datetime.combine(plan_day, dtime(hour=0, minute=1), tzinfo=TORN_TIMEZONE).astimezone(APP_TIMEZONE)
-            actions.append(JumpStep(refill_at, "TST refill reset", f"Daily refill resets at {fmt_tst(refill_at)} / {fmt_local(refill_at)} in your selected timezone."))
-            actions.append(JumpStep(refill_at + timedelta(minutes=1), "Use daily refill", f"Use the daily refill and train that energy into {instruction.target_stat.title()} at {gym.name}."))
-        # Three baseline xanax windows.
-        xanax_times = [
-            datetime.combine(plan_day, dtime(hour=8, minute=5), tzinfo=APP_TIMEZONE),
-            datetime.combine(plan_day, dtime(hour=15, minute=5), tzinfo=APP_TIMEZONE),
-            datetime.combine(plan_day, dtime(hour=22, minute=5), tzinfo=APP_TIMEZONE),
-        ]
+            refill_reset = datetime.combine(plan_day, dtime(hour=0, minute=1), tzinfo=TORN_TIMEZONE).astimezone(APP_TIMEZONE)
+            actions.append(JumpStep(refill_reset, "TST refill reset", f"Daily refill resets at {fmt_tst(refill_reset)} / {fmt_local(refill_reset)} in your selected timezone."))
+            refill_use = schedule_action_time(goal, refill_reset + timedelta(minutes=1))
+            actions.append(JumpStep(refill_use, "Use daily refill", f"Use the daily refill and train that energy into {instruction.target_stat.title()} at {gym.name}."))
+
+        xanax_capacity = estimated_daily_xanax_capacity(state, goal)
+        xanax_times: List[datetime] = []
+        if xanax_capacity > 0:
+            candidate = day_start + timedelta(minutes=5)
+            sleep_start = getattr(goal, "sleep_start_time", dtime(hour=23, minute=0))
+            sleep_cutoff = datetime.combine(plan_day, sleep_start, tzinfo=APP_TIMEZONE) if getattr(goal, "sleep_schedule_enabled", False) else datetime.combine(plan_day, dtime(hour=23, minute=59), tzinfo=APP_TIMEZONE)
+            cooldown = timedelta(hours=float(getattr(goal, "assumed_xanax_cooldown_hours", 8.0)))
+            while len(xanax_times) < xanax_capacity and candidate <= sleep_cutoff:
+                candidate = schedule_action_time(goal, candidate)
+                if candidate.date() != plan_day:
+                    break
+                if getattr(goal, "sleep_schedule_enabled", False) and candidate >= sleep_cutoff:
+                    break
+                xanax_times.append(candidate)
+                candidate = candidate + cooldown
         for idx, when in enumerate(xanax_times, start=1):
             actions.append(JumpStep(when, f"Baseline Xanax #{idx}", f"Take Xanax #{idx} if you are following the baseline plan, then train the extra {state.recovery.xanax_energy} energy in {gym.name}."))
+
         end_dt = datetime.combine(plan_day, dtime(hour=23, minute=59), tzinfo=APP_TIMEZONE)
-        natural_e = natural_energy_between(state, combined_mods, day_start, end_dt)
-        actions.append(JumpStep(end_dt, "Natural regen through end of day", f"About {natural_e} natural energy will regenerate through the end of this day at your current regen rate."))
+        natural_e = natural_energy_between(state, goal, combined_mods, day_start, end_dt)
+        natural_label = "Natural regen while awake" if getattr(goal, "sleep_schedule_enabled", False) else "Natural regen through end of day"
+        natural_detail = f"About {natural_e} natural energy will regenerate while you are awake for the rest of this day at your current regen rate." if getattr(goal, "sleep_schedule_enabled", False) else f"About {natural_e} natural energy will regenerate through the end of this day at your current regen rate."
+        actions.append(JumpStep(schedule_action_time(goal, end_dt), natural_label, natural_detail))
     elif instruction.day_type == "prep":
-        actions.append(JumpStep(day_start + timedelta(minutes=5), "Hold most energy", "Save as much energy as possible today so the scheduled jump can go off on time."))
+        actions.append(JumpStep(schedule_action_time(goal, day_start + timedelta(minutes=5)), "Hold most energy", "Save as much energy as possible today so the scheduled jump can go off on time."))
         if jump_plan is not None:
-            actions.append(JumpStep(jump_plan.execute_at - timedelta(hours=1), "Final jump prep check", f"Confirm items, cooldowns, and stack before the jump at {fmt_local(jump_plan.execute_at)}."))
+            actions.append(JumpStep(schedule_action_time(goal, jump_plan.execute_at - timedelta(hours=1)), "Final jump prep check", f"Confirm items, cooldowns, and stack before the jump at {fmt_local(jump_plan.execute_at)}."))
     else:
-        actions.append(JumpStep(day_start + timedelta(minutes=5), "Follow jump sequence", "This day is part of a jump sequence. Use the timed steps shown here in order."))
+        actions.append(JumpStep(schedule_action_time(goal, day_start + timedelta(minutes=5)), "Follow jump sequence", "This day is part of a jump sequence. Use the timed steps shown here in order."))
 
     return sorted(actions, key=lambda x: x.when)
 
