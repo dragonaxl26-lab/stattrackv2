@@ -2575,16 +2575,37 @@ def next_viable_happy_jump_window(state: PlayerState, goal: GoalSettings) -> dat
 
 def planned_xanax_stack_times(state: PlayerState, goal: GoalSettings, execute_at: datetime) -> List[datetime]:
     execute_at = to_local(execute_at)
-    first_candidate = execute_at - timedelta(hours=goal.jump_prep_hours)
+    cooldown_gap = timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
+    uses = max(1, int(goal.jump_stack_xanax_uses))
+
+    # Classic jump flow: take the 4th Xanax, wait for that cooldown to clear,
+    # then execute the happy / 99k setup immediately.
+    latest_last_xanax = execute_at - cooldown_gap
     earliest_allowed = local_now() + timedelta(minutes=max(0, state.recovery.drug_cd_minutes))
-    first = max(first_candidate, earliest_allowed)
-    first = schedule_action_time(goal, first) if getattr(goal, "sleep_schedule_enabled", False) else first
-    times = [first]
-    for _ in range(1, int(goal.jump_stack_xanax_uses)):
-        next_time = times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
-        next_time = schedule_action_time(goal, next_time) if getattr(goal, "sleep_schedule_enabled", False) else next_time
-        times.append(next_time)
-    return times
+
+    planned: List[datetime] = []
+    current = latest_last_xanax
+    for _ in range(uses):
+        candidate = current
+        if getattr(goal, "sleep_schedule_enabled", False):
+            candidate = schedule_action_time(goal, candidate)
+        planned.append(candidate)
+        current = candidate - cooldown_gap
+
+    planned.reverse()
+
+    # If the earliest planned Xanax is already in the past or blocked by current
+    # drug cooldown, push the whole stack forward while preserving spacing.
+    if planned and planned[0] < earliest_allowed:
+        shifted = [earliest_allowed]
+        for _ in range(1, uses):
+            nxt = shifted[-1] + cooldown_gap
+            if getattr(goal, "sleep_schedule_enabled", False):
+                nxt = schedule_action_time(goal, nxt)
+            shifted.append(nxt)
+        planned = shifted
+
+    return planned
 
 
 
@@ -2620,7 +2641,14 @@ def build_jump_sequence(state: PlayerState, goal: GoalSettings, jump_plan: JumpP
         steps.append(JumpStep(local_now(), "Spend current energy", f"Use your current {state.recovery.current_energy} energy now unless you are already in the final save-for-jump window."))
 
     for idx, use_time in enumerate(xanax_times, start=1):
-        steps.append(JumpStep(use_time, f"Take Xanax #{idx}", "Take the dose as soon as drug cooldown clears, then let the next cooldown run."))
+        detail = "Take the dose as soon as drug cooldown clears, then let the next cooldown run."
+        if idx == len(xanax_times):
+            detail = "Take the final Xanax, then wait for that cooldown to finish before starting the jump setup."
+        steps.append(JumpStep(use_time, f"Take Xanax #{idx}", detail))
+
+    if xanax_times:
+        final_clear = xanax_times[-1] + timedelta(hours=float(goal.assumed_xanax_cooldown_hours))
+        steps.append(JumpStep(final_clear, "Final Xanax cooldown clear", "Your 4th Xanax cooldown is done. Start the jump setup now."))
 
     ready_time = jump_plan.execute_at - timedelta(minutes=2)
     steps.append(JumpStep(ready_time, "Be ready in gym", f"Open {jump_plan.gym_name} and have all items ready before the quarter-hour mark."))
@@ -2629,7 +2657,8 @@ def build_jump_sequence(state: PlayerState, goal: GoalSettings, jump_plan: JumpP
         steps.append(JumpStep(jump_plan.execute_at, "Use happy items", "Use your standard happy jump item set right after the quarter-hour reset."))
         steps.append(JumpStep(jump_plan.execute_at + timedelta(seconds=10), "Use Ecstasy", "Use Ecstasy immediately after happy items."))
     else:
-        steps.append(JumpStep(jump_plan.execute_at, "Execute 99k setup", "Use your planned 99k method/service on the selected day, then start training immediately."))
+        steps.append(JumpStep(jump_plan.execute_at, "Use 99k happy setup", "Use your 99k happy setup / service right after the quarter-hour reset."))
+        steps.append(JumpStep(jump_plan.execute_at + timedelta(seconds=10), "Use Ecstasy", "Use Ecstasy immediately after the 99k happy setup."))
 
     steps.append(JumpStep(jump_plan.execute_at + timedelta(seconds=20), "Train stacked energy", f"Train all stacked energy into {jump_plan.target_stat.title()} at {jump_plan.gym_name}."))
 
