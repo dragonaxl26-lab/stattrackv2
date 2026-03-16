@@ -3776,20 +3776,83 @@ def render_forecast(state: PlayerState, goal: GoalSettings, manual_mods: Trainin
 
 def render_war_calendar_editor(state: PlayerState) -> None:
     st.subheader("War / non-training days")
-    st.caption("API-loaded war days can be edited manually here. Manual edits become the planner source of truth for this session.")
-    default_text = ", ".join(d.isoformat() for d in state.faction_war_days)
-    raw = st.text_input("War days (comma-separated YYYY-MM-DD)", value=default_text)
-    parsed_days: List[date] = []
-    if raw.strip():
-        for token in raw.split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                parsed_days.append(date.fromisoformat(token))
-            except ValueError:
-                st.warning(f"Could not parse war date: {token}")
-    state.faction_war_days = sorted(set(parsed_days))
+    st.caption("Use quick-add controls instead of typing a long comma-separated list. Manual edits become the planner source of truth for this session.")
+
+    if "war_days_editor" not in st.session_state:
+        st.session_state.war_days_editor = sorted(set(state.faction_war_days))
+
+    current_days: List[date] = sorted(set(st.session_state.war_days_editor))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        single_day = st.date_input("Add single day", value=local_today(), key="war_day_single_input")
+        if st.button("Add day", key="war_day_add_button", use_container_width=True):
+            current_days.append(single_day)
+            st.session_state.war_days_editor = sorted(set(current_days))
+            st.rerun()
+
+    with c2:
+        default_range = (local_today(), local_today() + timedelta(days=2))
+        range_value = st.date_input("Add date range", value=default_range, key="war_day_range_input")
+        if st.button("Add range", key="war_day_add_range_button", use_container_width=True):
+            dates_to_add: List[date] = []
+            if isinstance(range_value, tuple) and len(range_value) == 2:
+                start_day, end_day = range_value
+                if start_day > end_day:
+                    start_day, end_day = end_day, start_day
+                span = min((end_day - start_day).days, 120)
+                dates_to_add = [start_day + timedelta(days=i) for i in range(span + 1)]
+            elif isinstance(range_value, date):
+                dates_to_add = [range_value]
+            current_days.extend(dates_to_add)
+            st.session_state.war_days_editor = sorted(set(current_days))
+            st.rerun()
+
+    c3, c4 = st.columns([3, 1])
+    with c3:
+        remove_options = ["-- none --"] + [d.isoformat() for d in current_days]
+        remove_choice = st.selectbox("Remove a saved day", options=remove_options, key="war_day_remove_choice")
+    with c4:
+        st.write("")
+        st.write("")
+        if st.button("Remove day", key="war_day_remove_button", use_container_width=True):
+            if remove_choice != "-- none --":
+                st.session_state.war_days_editor = [d for d in current_days if d.isoformat() != remove_choice]
+                st.rerun()
+
+    c5, c6 = st.columns(2)
+    with c5:
+        if st.button("Use API-loaded days", key="war_day_reset_api_button", use_container_width=True):
+            st.session_state.war_days_editor = sorted(set(state.faction_war_days))
+            st.rerun()
+    with c6:
+        if st.button("Clear all days", key="war_day_clear_button", use_container_width=True):
+            st.session_state.war_days_editor = []
+            st.rerun()
+
+    with st.expander("Paste / edit raw dates manually"):
+        raw_default = ", ".join(d.isoformat() for d in current_days)
+        raw = st.text_input("War days (comma-separated YYYY-MM-DD)", value=raw_default, key="war_day_raw_input")
+        if st.button("Apply raw dates", key="war_day_apply_raw_button"):
+            parsed_days: List[date] = []
+            if raw.strip():
+                for token in raw.split(","):
+                    token = token.strip()
+                    if not token:
+                        continue
+                    try:
+                        parsed_days.append(date.fromisoformat(token))
+                    except ValueError:
+                        st.warning(f"Could not parse war date: {token}")
+            st.session_state.war_days_editor = sorted(set(parsed_days))
+            st.rerun()
+
+    final_days = sorted(set(st.session_state.war_days_editor))
+    state.faction_war_days = final_days
+    if final_days:
+        st.caption("Current war / non-training days: " + " • ".join(d.strftime("%b %d") for d in final_days))
+    else:
+        st.caption("No war / non-training days currently set.")
 
 
 def render_gain_debug_panel(state: PlayerState, goal: GoalSettings, ratio: RatioProfile, manual_mods: TrainingModifiers) -> None:
