@@ -163,6 +163,19 @@ def _write_persistence_store(store: Dict[str, Any]) -> None:
     PERSISTENCE_PATH.write_text(json.dumps(_jsonify(store), indent=2), encoding="utf-8")
 
 
+def _safe_dataclass_load(cls, payload: Any, aliases: Optional[Dict[str, str]] = None):
+    if not isinstance(payload, dict):
+        return cls()
+    aliases = aliases or {}
+    allowed = {f.name for f in fields(cls)}
+    filtered = {}
+    for key, value in payload.items():
+        mapped = aliases.get(key, key)
+        if mapped in allowed:
+            filtered[mapped] = value
+    return cls(**filtered)
+
+
 def reset_runtime_state(keep_api_fields: bool = True) -> None:
     loaded_namespace = st.session_state.get("_loaded_persistence_namespace") if keep_api_fields else None
     st.session_state.player_state = None
@@ -196,11 +209,17 @@ def reset_runtime_state(keep_api_fields: bool = True) -> None:
 
 def _apply_persistent_payload(payload: Dict[str, Any]) -> None:
     if isinstance(payload.get("goal_settings"), dict):
-        st.session_state.goal_settings = GoalSettings(**payload["goal_settings"])
+        st.session_state.goal_settings = _safe_dataclass_load(
+            GoalSettings,
+            payload["goal_settings"],
+            aliases={
+                "auto_schedule_jumps": "auto_schedule_happy_jumps",
+            },
+        )
     if isinstance(payload.get("ratio_profile"), dict):
-        st.session_state.ratio_profile = RatioProfile(**payload["ratio_profile"])
+        st.session_state.ratio_profile = _safe_dataclass_load(RatioProfile, payload["ratio_profile"])
     if isinstance(payload.get("manual_mods"), dict):
-        st.session_state.manual_mods = TrainingModifiers(**payload["manual_mods"])
+        st.session_state.manual_mods = _safe_dataclass_load(TrainingModifiers, payload["manual_mods"])
     if isinstance(payload.get("player_state"), dict):
         st.session_state.player_state = _player_state_from_dict(payload["player_state"])
     st.session_state.manual_unlocked_gyms = list(payload.get("manual_unlocked_gyms", []))
