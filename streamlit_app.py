@@ -56,60 +56,7 @@ APP_TIMEZONE = ZoneInfo(DEFAULT_APP_TIMEZONE_NAME)
 ALL_TIMEZONE_OPTIONS = sorted(available_timezones())
 PERSISTENCE_PATH = Path(".streamlit/torn_planner_persistence.json")
 
-# ---------------------------------------------------------------------------
-# Single source of truth for all persisted session-state keys + defaults.
-# reset_runtime_state, _current_persistence_payload, and
-# _apply_persistent_payload all drive off this dict, so adding a new setting
-# only requires one edit here.
-# ---------------------------------------------------------------------------
-PERSISTENCE_DEFAULTS: Dict[str, Any] = {
-    "goal_settings": None,
-    "ratio_profile": None,
-    "manual_mods": None,
-    "manual_unlocked_gyms": [],
-    "gym_multiselect": [],
-    "highest_unlocked_gym_selector": "-- none --",
-    "manual_99k_jump_entries": [],
-    "player_state": None,
-    "preview_days": 30,
-    "display_timezone_name": DEFAULT_APP_TIMEZONE_NAME,
-    "use_tct_times": False,
-    "sleep_schedule_enabled": False,
-    "sleep_start_time": dtime(hour=23, minute=0),
-    "sleep_end_time": dtime(hour=7, minute=0),
-    "notifications_enabled": True,
-    "notification_toasts_enabled": True,
-    "notification_browser_enabled": False,
-    "notification_lead_minutes": 10,
-    "notify_refill_ready": True,
-    "notify_drug_clear": True,
-    "notify_booster_clear": True,
-    "notify_jump_prep": True,
-    "notify_jump_execute": True,
-    "notify_gym_unlock": True,
-}
 
-_PERSISTENCE_CASTS: Dict[str, type] = {
-    "preview_days": int,
-    "notification_lead_minutes": int,
-    "use_tct_times": bool,
-    "sleep_schedule_enabled": bool,
-    "notifications_enabled": bool,
-    "notification_toasts_enabled": bool,
-    "notification_browser_enabled": bool,
-    "notify_refill_ready": bool,
-    "notify_drug_clear": bool,
-    "notify_booster_clear": bool,
-    "notify_jump_prep": bool,
-    "notify_jump_execute": bool,
-    "notify_gym_unlock": bool,
-}
-
-_PERSISTENCE_LIST_KEYS: set = {
-    "manual_unlocked_gyms",
-    "gym_multiselect",
-    "manual_99k_jump_entries",
-}
 
 
 def set_app_timezone(timezone_name: Optional[str]) -> None:
@@ -159,15 +106,15 @@ def _dejsonify(value: Any) -> Any:
 
 def _player_state_from_dict(data: Dict[str, Any]) -> PlayerState:
     return PlayerState(
-        stats=_safe_dataclass_load(PlayerStats, data.get("stats", {})),
-        recovery=_safe_dataclass_load(RecoveryState, data.get("recovery", {})),
-        training_modifiers=_safe_dataclass_load(TrainingModifiers, data.get("training_modifiers", {})),
+        stats=PlayerStats(**data.get("stats", {})),
+        recovery=RecoveryState(**data.get("recovery", {})),
         unlocked_gyms=list(data.get("unlocked_gyms", [])),
         faction_war_days=list(data.get("faction_war_days", [])),
         torn_name=data.get("torn_name", ""),
         torn_id=data.get("torn_id"),
         faction_id=data.get("faction_id"),
         faction_name=data.get("faction_name", ""),
+        training_modifiers=TrainingModifiers(**data.get("training_modifiers", {})),
         api_notes=list(data.get("api_notes", [])),
         last_sync=data.get("last_sync"),
     )
@@ -175,8 +122,30 @@ def _player_state_from_dict(data: Dict[str, Any]) -> PlayerState:
 
 def _current_persistence_payload() -> Dict[str, Any]:
     return {
-        key: st.session_state.get(key, default)
-        for key, default in PERSISTENCE_DEFAULTS.items()
+        "goal_settings": st.session_state.get("goal_settings"),
+        "ratio_profile": st.session_state.get("ratio_profile"),
+        "manual_mods": st.session_state.get("manual_mods"),
+        "manual_unlocked_gyms": st.session_state.get("manual_unlocked_gyms", []),
+        "gym_multiselect": st.session_state.get("gym_multiselect", []),
+        "highest_unlocked_gym_selector": st.session_state.get("highest_unlocked_gym_selector", "-- none --"),
+        "manual_99k_jump_entries": st.session_state.get("manual_99k_jump_entries", []),
+        "player_state": st.session_state.get("player_state"),
+        "preview_days": st.session_state.get("preview_days", 30),
+        "display_timezone_name": st.session_state.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME),
+        "use_tct_times": st.session_state.get("use_tct_times", False),
+        "sleep_schedule_enabled": st.session_state.get("sleep_schedule_enabled", False),
+        "sleep_start_time": st.session_state.get("sleep_start_time", dtime(hour=23, minute=0)),
+        "sleep_end_time": st.session_state.get("sleep_end_time", dtime(hour=7, minute=0)),
+        "notifications_enabled": st.session_state.get("notifications_enabled", True),
+        "notification_toasts_enabled": st.session_state.get("notification_toasts_enabled", True),
+        "notification_browser_enabled": st.session_state.get("notification_browser_enabled", False),
+        "notification_lead_minutes": st.session_state.get("notification_lead_minutes", 10),
+        "notify_refill_ready": st.session_state.get("notify_refill_ready", True),
+        "notify_drug_clear": st.session_state.get("notify_drug_clear", True),
+        "notify_booster_clear": st.session_state.get("notify_booster_clear", True),
+        "notify_jump_prep": st.session_state.get("notify_jump_prep", True),
+        "notify_jump_execute": st.session_state.get("notify_jump_execute", True),
+        "notify_gym_unlock": st.session_state.get("notify_gym_unlock", True),
     }
 
 
@@ -212,19 +181,32 @@ def _safe_dataclass_load(cls, payload: Any, aliases: Optional[Dict[str, str]] = 
 
 def reset_runtime_state(keep_api_fields: bool = True) -> None:
     loaded_namespace = st.session_state.get("_loaded_persistence_namespace") if keep_api_fields else None
-
-    for key, default in PERSISTENCE_DEFAULTS.items():
-        st.session_state[key] = list(default) if isinstance(default, list) else default
-
-    # Overwrite dataclass keys with fresh instances
+    st.session_state.player_state = None
     st.session_state.goal_settings = GoalSettings()
     st.session_state.ratio_profile = RatioProfile()
     st.session_state.manual_mods = TrainingModifiers()
-    # Derived defaults
+    st.session_state.manual_unlocked_gyms = []
+    st.session_state.gym_multiselect = []
+    st.session_state.selected_calendar_date = None
+    st.session_state.highest_unlocked_gym_selector = "-- none --"
     st.session_state.manual_99k_jump_date = local_today() + timedelta(days=7)
     st.session_state.manual_99k_jump_entries = manual_99k_schedule_datetimes(st.session_state.goal_settings)
-    # Non-persisted runtime keys
-    st.session_state.selected_calendar_date = None
+    st.session_state.preview_days = 30
+    st.session_state.display_timezone_name = DEFAULT_APP_TIMEZONE_NAME
+    st.session_state.use_tct_times = False
+    st.session_state.sleep_schedule_enabled = False
+    st.session_state.sleep_start_time = dtime(hour=23, minute=0)
+    st.session_state.sleep_end_time = dtime(hour=7, minute=0)
+    st.session_state.notifications_enabled = True
+    st.session_state.notification_toasts_enabled = True
+    st.session_state.notification_browser_enabled = False
+    st.session_state.notification_lead_minutes = 10
+    st.session_state.notify_refill_ready = True
+    st.session_state.notify_drug_clear = True
+    st.session_state.notify_booster_clear = True
+    st.session_state.notify_jump_prep = True
+    st.session_state.notify_jump_execute = True
+    st.session_state.notify_gym_unlock = True
     st.session_state._notified_events = []
     st.session_state._persistence_error = None
     if keep_api_fields:
@@ -232,29 +214,40 @@ def reset_runtime_state(keep_api_fields: bool = True) -> None:
 
 
 def _apply_persistent_payload(payload: Dict[str, Any]) -> None:
-    # Dataclass fields — use safe loader to tolerate schema drift
-    _dataclass_keys = {
-        "goal_settings": (GoalSettings, {"auto_schedule_jumps": "auto_schedule_happy_jumps"}),
-        "ratio_profile": (RatioProfile, {}),
-        "manual_mods": (TrainingModifiers, {}),
-    }
-    for key, (cls, aliases) in _dataclass_keys.items():
-        if isinstance(payload.get(key), dict):
-            st.session_state[key] = _safe_dataclass_load(cls, payload[key], aliases)
-
+    if isinstance(payload.get("goal_settings"), dict):
+        st.session_state.goal_settings = _safe_dataclass_load(
+            GoalSettings,
+            payload["goal_settings"],
+            aliases={
+                "auto_schedule_jumps": "auto_schedule_happy_jumps",
+            },
+        )
+    if isinstance(payload.get("ratio_profile"), dict):
+        st.session_state.ratio_profile = _safe_dataclass_load(RatioProfile, payload["ratio_profile"])
+    if isinstance(payload.get("manual_mods"), dict):
+        st.session_state.manual_mods = _safe_dataclass_load(TrainingModifiers, payload["manual_mods"])
     if isinstance(payload.get("player_state"), dict):
         st.session_state.player_state = _player_state_from_dict(payload["player_state"])
-
-    for key, default in PERSISTENCE_DEFAULTS.items():
-        if key in _dataclass_keys or key == "player_state":
-            continue
-        raw = payload.get(key, default)
-        if key in _PERSISTENCE_LIST_KEYS:
-            st.session_state[key] = list(raw) if raw is not None else []
-        elif key in _PERSISTENCE_CASTS:
-            st.session_state[key] = _PERSISTENCE_CASTS[key](raw)
-        else:
-            st.session_state[key] = raw if raw is not None else default
+    st.session_state.manual_unlocked_gyms = list(payload.get("manual_unlocked_gyms", []))
+    st.session_state.gym_multiselect = list(payload.get("gym_multiselect", []))
+    st.session_state.highest_unlocked_gym_selector = payload.get("highest_unlocked_gym_selector", "-- none --")
+    st.session_state.manual_99k_jump_entries = list(payload.get("manual_99k_jump_entries", st.session_state.get("manual_99k_jump_entries", [])))
+    st.session_state.preview_days = int(payload.get("preview_days", 30))
+    st.session_state.display_timezone_name = payload.get("display_timezone_name", DEFAULT_APP_TIMEZONE_NAME)
+    st.session_state.use_tct_times = bool(payload.get("use_tct_times", False))
+    st.session_state.sleep_schedule_enabled = bool(payload.get("sleep_schedule_enabled", False))
+    st.session_state.sleep_start_time = payload.get("sleep_start_time", dtime(hour=23, minute=0))
+    st.session_state.sleep_end_time = payload.get("sleep_end_time", dtime(hour=7, minute=0))
+    st.session_state.notifications_enabled = bool(payload.get("notifications_enabled", True))
+    st.session_state.notification_toasts_enabled = bool(payload.get("notification_toasts_enabled", True))
+    st.session_state.notification_browser_enabled = bool(payload.get("notification_browser_enabled", False))
+    st.session_state.notification_lead_minutes = int(payload.get("notification_lead_minutes", 10))
+    st.session_state.notify_refill_ready = bool(payload.get("notify_refill_ready", True))
+    st.session_state.notify_drug_clear = bool(payload.get("notify_drug_clear", True))
+    st.session_state.notify_booster_clear = bool(payload.get("notify_booster_clear", True))
+    st.session_state.notify_jump_prep = bool(payload.get("notify_jump_prep", True))
+    st.session_state.notify_jump_execute = bool(payload.get("notify_jump_execute", True))
+    st.session_state.notify_gym_unlock = bool(payload.get("notify_gym_unlock", True))
 
 
 def load_persistent_state_for_api(api_key: str) -> None:
@@ -283,14 +276,15 @@ def save_persistent_state(api_key: str = "") -> None:
     if not namespace:
         return
     store = _read_persistence_store()
+    profiles = store.setdefault("profiles", {})
     payload = _current_persistence_payload()
-    ps = st.session_state.get("player_state")
-    payload["_meta"] = {
-        "torn_name": getattr(ps, "torn_name", "") if ps else "",
-        "torn_id": getattr(ps, "torn_id", None) if ps else None,
+    metadata = {
+        "torn_name": getattr(st.session_state.get("player_state"), "torn_name", "") if st.session_state.get("player_state") else "",
+        "torn_id": getattr(st.session_state.get("player_state"), "torn_id", None) if st.session_state.get("player_state") else None,
         "saved_at": local_now(),
     }
-    store.setdefault("profiles", {})[namespace] = payload
+    payload["_meta"] = metadata
+    profiles[namespace] = payload
     _write_persistence_store(store)
 
 
